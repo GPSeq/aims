@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:aims:schema:truth-manifest:0.1.0",
+  "title": "AIMS TruthManifest",
+  "type": "object",
+  "required": ["schema_version", "truth_id", "comparison_stage", "records"],
+  "properties": {
+    "schema_version": { "const": "0.1.0" },
+    "truth_id": { "type": "string" },
+    "comparison_stage": {
+      "type": "string",
+      "enum": [
+        "exact_retrieval",
+        "pseudoalignment",
+        "probabilistic_routing",
+        "routing_only",
+        "end_to_end"
+      ]
+    },
+    "coordinate_system": {
+      "type": "string",
+      "enum": ["zero_based_half_open", "one_based_closed", "not_applicable"]
+    },
+    "records": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["query_id", "expected"],
+        "properties": {
+          "query_id": { "type": "string" },
+          "expected": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["document_id", "sequence_id"],
+              "properties": {
+                "document_id": { "type": "integer", "minimum": 0 },
+                "sequence_id": { "type": "integer", "minimum": 0 },
+                "start": { "type": "integer", "minimum": 0 },
+                "end": { "type": "integer", "minimum": 0 },
+                "strand": { "type": "string", "enum": ["forward", "reverse", "unknown"] }
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

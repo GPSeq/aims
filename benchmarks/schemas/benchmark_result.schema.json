@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:aims:schema:benchmark-result:0.1.0",
+  "title": "AIMS BenchmarkResult",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "run_id",
+    "tool",
+    "comparison_stage",
+    "dataset",
+    "cache_mode",
+    "early_stop_mode",
+    "metrics"
+  ],
+  "properties": {
+    "schema_version": { "const": "0.1.0" },
+    "run_id": { "type": "string" },
+    "tool": { "type": "string" },
+    "tool_version": { "type": "string" },
+    "command": { "type": "string" },
+    "comparison_stage": {
+      "type": "string",
+      "enum": [
+        "exact_retrieval",
+        "pseudoalignment",
+        "probabilistic_routing",
+        "routing_only",
+        "end_to_end"
+      ]
+    },
+    "dataset": {
+      "type": "object",
+      "required": ["name", "reference_uri", "query_uri"],
+      "properties": {
+        "name": { "type": "string" },
+        "reference_uri": { "type": "string" },
+        "reference_sha256": { "type": "string" },
+        "reference_checksum": { "type": "string" },
+        "query_uri": { "type": "string" },
+        "query_sha256": { "type": "string" },
+        "truth_uri": { "type": "string" },
+        "truth_sha256": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "cache_mode": { "type": "string", "enum": ["cold", "warm"] },
+    "loading_mode": { "type": "string", "enum": ["copy", "mmap"] },
+    "repeats": { "type": "integer", "minimum": 1 },
+    "index": {
+      "type": "object",
+      "required": [
+        "seed_families",
+        "k_values",
+        "serialized_size_bytes",
+        "build_wall_ms",
+        "build_cpu_ms",
+        "load_wall_ms",
+        "load_cpu_ms",
+        "peak_rss_bytes"
+      ],
+      "properties": {
+        "seed_families": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["kmer"] }
+        },
+        "k_values": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 1, "maximum": 32 }
+        },
+        "serialized_size_bytes": { "type": "integer", "minimum": 0 },
+        "build_wall_ms": { "type": "integer", "minimum": 0 },
+        "build_cpu_ms": { "type": "number", "minimum": 0 },
+        "load_wall_ms": { "type": "integer", "minimum": 0 },
+        "load_cpu_ms": { "type": "number", "minimum": 0 },
+        "peak_rss_bytes": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "early_stop_mode": {
+      "type": "string",
+      "enum": ["off", "conservative_bound", "heuristic"]
+    },
+    "metrics": {
+      "type": "object",
+      "required": [
+        "queries",
+        "latency_ns_p50",
+        "latency_ns_p90",
+        "latency_ns_p95",
+        "latency_ns_p99",
+        "bytes_read_per_query",
+        "postings_decoded_per_query",
+        "seeds_generated_per_query",
+        "seeds_used_per_query",
+        "candidate_count_per_query"
+      ],
+      "properties": {
+        "queries": { "type": "integer", "minimum": 0 },
+        "query_runs": { "type": "integer", "minimum": 0 },
+        "query_wall_ms_total": { "type": "integer", "minimum": 0 },
+        "query_cpu_ms_total": { "type": "number", "minimum": 0 },
+        "latency_ns_p50": { "type": "number", "minimum": 0 },
+        "latency_ns_p90": { "type": "number", "minimum": 0 },
+        "latency_ns_p95": { "type": "number", "minimum": 0 },
+        "latency_ns_p99": { "type": "number", "minimum": 0 },
+        "bytes_read_per_query": { "type": "number", "minimum": 0 },
+        "postings_decoded_per_query": { "type": "number", "minimum": 0 },
+        "seeds_generated_per_query": { "type": "number", "minimum": 0 },
+        "seeds_used_per_query": { "type": "number", "minimum": 0 },
+        "seeds_skipped_hot_per_query": { "type": "number", "minimum": 0 },
+        "seeds_skipped_frequency_class_per_query": { "type": "number", "minimum": 0 },
+        "seeds_doc_only_hot_per_query": { "type": "number", "minimum": 0 },
+        "seeds_skipped_budget_per_query": { "type": "number", "minimum": 0 },
+        "postings_skipped_budget_per_query": { "type": "number", "minimum": 0 },
+        "candidate_count_per_query": { "type": "number", "minimum": 0 },
+        "truth_queries": { "type": "integer", "minimum": 0 },
+        "top1_recall": { "type": "number", "minimum": 0, "maximum": 1 },
+        "top5_recall": { "type": "number", "minimum": 0, "maximum": 1 },
+        "top10_recall": { "type": "number", "minimum": 0, "maximum": 1 }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

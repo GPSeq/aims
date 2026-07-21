@@ -1,0 +1,5 @@
+query_id	comparison_stage	expected_document_ids	note
+q_doc0_exact	exact_retrieval	0,1	doc1 is reverse-complement duplicate of the same segment
+q_doc2_repeat	exact_retrieval	2	repetitive seed support should rank doc2 highly
+q_ambiguous_split	exact_retrieval	3	ambiguous query bases split seed extraction
+q_absent	exact_retrieval		no exact k-mer evidence expected for k>=5

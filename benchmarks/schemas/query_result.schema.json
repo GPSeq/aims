@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:aims:schema:query-result:0.1.0",
+  "title": "AIMS QueryResult",
+  "type": "object",
+  "required": [
+    "query_id",
+    "comparison_stage",
+    "plan_label",
+    "seeds_generated",
+    "seeds_queried",
+    "exact_bytes_read",
+    "postings_decoded",
+    "candidates_created",
+    "per_k_metrics",
+    "topk_results",
+    "elapsed_ns"
+  ],
+  "properties": {
+    "query_id": { "type": "string" },
+    "comparison_stage": { "const": "exact_retrieval" },
+    "plan_label": { "type": "string" },
+    "seeds_generated": { "type": "integer", "minimum": 0 },
+    "seeds_queried": { "type": "integer", "minimum": 0 },
+    "seeds_skipped_hot": { "type": "integer", "minimum": 0 },
+    "seeds_skipped_frequency_class": { "type": "integer", "minimum": 0 },
+    "seeds_doc_only_hot": { "type": "integer", "minimum": 0 },
+    "seeds_skipped_budget": { "type": "integer", "minimum": 0 },
+    "postings_skipped_budget": { "type": "integer", "minimum": 0 },
+    "router_seeds_used": { "type": "integer", "minimum": 0 },
+    "bins_returned": { "type": "integer", "minimum": 0 },
+    "router_bytes_read": { "type": "integer", "minimum": 0 },
+    "exact_bytes_read": { "type": "integer", "minimum": 0 },
+    "postings_decoded": { "type": "integer", "minimum": 0 },
+    "candidates_created": { "type": "integer", "minimum": 0 },
+    "candidates_touched": { "type": "integer", "minimum": 0 },
+    "peak_accumulator_bytes": { "type": "integer", "minimum": 0 },
+    "early_stop_fired": { "type": "boolean" },
+    "early_stop_rule": { "type": "string" },
+    "per_k_metrics": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["k", "seeds_generated", "seeds_queried", "exact_bytes_read", "postings_decoded"],
+        "properties": {
+          "k": { "type": "integer", "minimum": 1 },
+          "seeds_generated": { "type": "integer", "minimum": 0 },
+          "seeds_queried": { "type": "integer", "minimum": 0 },
+          "seeds_skipped_hot": { "type": "integer", "minimum": 0 },
+          "seeds_skipped_frequency_class": { "type": "integer", "minimum": 0 },
+          "seeds_doc_only_hot": { "type": "integer", "minimum": 0 },
+          "seeds_skipped_budget": { "type": "integer", "minimum": 0 },
+          "exact_bytes_read": { "type": "integer", "minimum": 0 },
+          "postings_decoded": { "type": "integer", "minimum": 0 }
+        },
+        "additionalProperties": false
+      }
+    },
+    "topk_results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["rank", "document_id", "sequence_id", "sequence_name", "strand", "supporting_seeds", "score"],
+        "properties": {
+          "rank": { "type": "integer", "minimum": 1 },
+          "document_id": { "type": "integer", "minimum": 0 },
+          "sequence_id": { "type": "integer", "minimum": 0 },
+          "sequence_name": { "type": "string" },
+          "strand": { "type": "string", "enum": ["forward", "reverse"] },
+          "supporting_seeds": { "type": "integer", "minimum": 0 },
+          "score": { "type": "number" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "elapsed_ns": { "type": "integer", "minimum": 0 }
+  },
+  "additionalProperties": false
+}

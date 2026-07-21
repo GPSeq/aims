@@ -1,0 +1,263 @@
+\documentclass[11pt]{article}
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{hyperref}
+
+\title{AIMS k-mer Exact Retrieval Algorithm}
+\author{AIMS Research Prototype}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{Scope}
+
+AIMS is a k-mer exact-retrieval index for DNA sequence collections. It is not an aligner. Its purpose is to answer the question: ``which reference sequences have exact k-mer evidence for this query, and how much did that evidence cost to retrieve?'' The system builds a multi-\(k\) canonical k-mer index, stores compressed coordinate-aware postings, and answers queries by ordering seed lookups according to estimated information per byte accessed.
+
+This separation is intentional. AIMS performs exact seed generation, exact dictionary lookup, compressed posting retrieval, and candidate accumulation. It does not perform base-level dynamic-programming alignment in the core library. A downstream aligner can consume the candidate list, but benchmark output must label that as a different stage.
+
+\section{Design Goals}
+
+The implementation is designed around four scientific requirements:
+\begin{enumerate}
+  \item exactness of indexed k-mer membership and coordinate reporting,
+  \item first-class accounting of compressed bytes read and postings decoded,
+  \item deterministic construction and query output for reproducible experiments,
+  \item modular stages so benchmarks can compare retrieval against retrieval, not retrieval against alignment.
+\end{enumerate}
+
+The current prototype is deliberately k-mer focused. Syncmers, strobemers, learned indexes, and full alignments are outside the active implementation path.
+
+\section{Data Model}
+
+Each reference sequence is assigned a document identifier \(d\), sequence identifier \(s\), name, and length. In the current command-line tools, one FASTA or FASTQ record is treated as one document and one sequence. This simple mapping makes the baseline easy to validate and can later be generalized to grouped documents.
+
+A posting is a tuple
+\[
+  p = (d, s, x, r),
+\]
+where \(x\) is the sequence-local coordinate and \(r \in \{\text{forward}, \text{reverse}\}\) is the canonical strand.
+
+For a seed key
+\[
+  u = (\text{kmer}, k, \text{encoded canonical k-mer}),
+\]
+the index stores:
+\begin{itemize}
+  \item document frequency \(df(u)\),
+  \item collection frequency \(cf(u)\),
+  \item estimated compressed posting bytes,
+  \item a compressed posting block.
+\end{itemize}
+
+Document frequency counts how many documents contain the seed. Collection frequency counts how many coordinate occurrences the seed has. These two values are intentionally separate: a seed can appear many times in one repetitive sequence while having low document frequency, or it can appear once in many documents.
+
+\section{Canonical k-mer Encoding}
+
+DNA bases are encoded with two bits:
+\[
+  A=0,\quad C=1,\quad G=2,\quad T=3.
+\]
+For every valid k-mer \(w\), AIMS computes the forward encoding \(f(w)\) and reverse-complement encoding \(rc(w)\). The canonical seed is
+\[
+  c(w) = \min(f(w), rc(w)).
+\]
+If \(rc(w) < f(w)\), the occurrence is marked as reverse strand. Ambiguous bases split seed extraction runs; k-mers spanning ambiguous bases are not emitted.
+
+\subsection{Example}
+
+For the k-mer \(w=\texttt{ACG}\), the forward two-bit representation is
+\[
+  f(w) = 00\,01\,10_2.
+\]
+The reverse complement is also \(\texttt{CGT}\) encoded as \(01\,10\,11_2\). The canonical value is the smaller integer. This rule makes a reference occurrence and its reverse-complement query occurrence meet at the same dictionary key while preserving strand as evidence.
+
+\section{Index Construction}
+
+For each configured \(k \in K\), AIMS builds one exact layer:
+\begin{enumerate}
+  \item read FASTA or FASTQ records,
+  \item generate canonical k-mer occurrences,
+  \item group occurrences by seed key,
+  \item sort postings by document, sequence, position, and strand,
+  \item compute \(df\), \(cf\), frequency class, and compressed byte estimates,
+  \item encode each posting list as a compressed posting block,
+  \item build a sorted dictionary and an auxiliary hash lookup table.
+\end{enumerate}
+
+The index file stores source metadata, sequence metadata, dictionary records, compressed posting blocks, and a checksum footer. The mmap reader keeps compressed posting blocks file-backed and decodes them lazily.
+
+\subsection{Construction Pseudocode}
+
+\begin{verbatim}
+for each k in requested_k_values:
+  postings_by_seed = empty ordered map
+  for each reference sequence:
+    for each unambiguous k-mer occurrence:
+      key = canonical_encode(k-mer)
+      postings_by_seed[key].append(document, sequence, position, strand)
+
+  for each key in sorted(postings_by_seed):
+    sort postings by document, sequence, position, strand
+    df = number of unique documents
+    cf = number of postings
+    encoded_block = delta_varint_encode(postings)
+    dictionary.add(key, df, cf, encoded_size, frequency_class)
+    posting_store.add(encoded_block)
+\end{verbatim}
+
+The ordered map and sorted posting lists make construction deterministic. Given the same input records, k values, compiler behavior, and command-line options, the serialized logical contents are stable.
+
+\subsection{Dictionary Layer}
+
+The exact dictionary is a sorted array of seed keys and metadata, plus an auxiliary hash table from seed key to seed identifier. The sorted array gives a deterministic serialized representation. The hash table gives constant-time lookup during queries. This is a pragmatic baseline: it is not a minimal perfect hash, but it is simple, exact, and easy to validate.
+
+\section{Posting Compression}
+
+Posting blocks are sorted and encoded with variable-length integers. For adjacent postings, AIMS delta-encodes document identifiers, sequence identifiers within the same document, and positions within the same sequence. Strand is stored as a one-bit logical value encoded as a varint.
+
+This representation is optimized for exact retrieval: compressed bytes read per query are reported as a first-class metric, while postings decoded per query reports the logical posting workload.
+
+\subsection{Encoding Rule}
+
+For the first posting in a block, document, sequence, and position are stored as absolute values. For later postings:
+\begin{itemize}
+  \item document is stored as the difference from the previous document,
+  \item sequence is stored as a difference only when the document is unchanged,
+  \item position is stored as a difference only when the sequence is unchanged,
+  \item strand is stored independently for each posting.
+\end{itemize}
+
+The decoder validates that all bytes are consumed. Extra bytes or impossible strand values are treated as corruption.
+
+\section{Query Planning}
+
+For query \(q\), AIMS generates canonical k-mers for every indexed \(k\). Repeated query seeds are deduplicated by \((k, seed\_id)\) before lookup, but their multiplicity is retained as support weight.
+
+For a seed \(u\), AIMS estimates:
+\[
+  w_{\mathrm{idf}}(u) = \log \frac{N+1}{df(u)+1},
+\]
+where \(N\) is the number of reference documents. The information estimate is
+\[
+  I(u) = w_{\mathrm{idf}}(u) \cdot \text{survival}(u) \cdot \text{length\_bonus}(k) \cdot \text{family\_reliability}.
+\]
+For the k-mer-only system, family reliability is one. The priority score is
+\[
+  P(u) = \frac{I(u)}{\widehat{B}(u)},
+\]
+where \(\widehat{B}(u)\) is the estimated compressed posting byte cost. Query seeds across all \(k\) layers are sorted by decreasing \(P(u)\).
+
+\subsection{Why Information per Byte}
+
+Rare seeds usually reduce the candidate space more than frequent seeds. However, rarity alone is not enough: a rare seed with a large posting block or a long decode path may be more expensive than another seed with slightly lower information but much lower byte cost. AIMS therefore ranks by estimated information divided by estimated memory access cost.
+
+This makes the query planner stage-matched to the goal of the prototype. It optimizes seed retrieval and candidate generation, not alignment score.
+
+\subsection{Budgeted Queries}
+
+The query engine can run without budgets for exact retrieval over all planned seeds. It can also use explicit budgets:
+\begin{itemize}
+  \item maximum seed lookups,
+  \item maximum decoded postings,
+  \item maximum candidate records,
+  \item hot-seed thresholds or hot-seed frequency classes.
+\end{itemize}
+
+Budgeted or hot-seed-skipping runs are labeled in metrics. They should not be reported as equivalent to unrestricted exact retrieval unless the benchmark explicitly states the policy.
+
+\subsection{Frequency Classes}
+
+At build time, every seed is assigned a frequency class from its collection frequency:
+\[
+  \text{rare} \rightarrow \text{medium} \rightarrow \text{hot} \rightarrow \text{very\_hot}.
+\]
+The thresholds are configurable through the build command. Query-time hot-seed policies can use either a numeric collection-frequency threshold or a stored frequency-class threshold. A class policy such as \texttt{--hot-seed-class hot} applies to both hot and very-hot seeds.
+
+\section{Candidate Accumulation}
+
+AIMS maintains a hash-map accumulator keyed by \((d, s, r)\). For each decoded posting, the candidate score and support count are updated. The top-\(k\) candidates are emitted with document ID, sequence ID, sequence name, strand, supporting seed count, and score.
+
+Hot seeds can be handled in two modes:
+\begin{description}
+  \item[skip] omit seeds above the configured collection-frequency threshold or frequency class;
+  \item[doc-only] decode the hot posting block but count at most one contribution per \((d,s,r)\).
+\end{description}
+
+\subsection{Scoring Interpretation}
+
+The candidate score is a retrieval score, not an alignment score. It measures accumulated exact-seed evidence after planner weighting. Two candidates with similar retrieval scores may still align differently if a downstream aligner is used. Therefore, AIMS output should be described as candidate retrieval or exact seed retrieval.
+
+\section{Serialization and Loading}
+
+The serialized index contains a magic value, version, endian marker, source metadata, sequence metadata, layer directories, dictionaries, posting blocks, and a checksum. The reader validates the format before exposing the index to query code.
+
+Two loading modes are supported:
+\begin{itemize}
+  \item copy mode, where posting blocks are read into process memory,
+  \item mmap mode, where posting blocks remain file-backed and are decoded lazily.
+\end{itemize}
+
+The mmap mode is important for memory experiments because compressed posting bytes can remain outside eagerly allocated heap storage. Benchmarks must report the loading mode because memory and latency behavior differ.
+
+\section{Budgets and Metrics}
+
+The query engine supports budgets for maximum seeds, maximum decoded postings, maximum candidates, hot-seed thresholds, and hot-seed frequency classes. Budgeted or skipped-seed runs are labeled as heuristic in benchmark output.
+
+Every query reports:
+\begin{itemize}
+  \item exact bytes read,
+  \item postings decoded,
+  \item seeds generated and queried,
+  \item skipped hot and budgeted seeds,
+  \item skipped frequency-class seeds and doc-only hot seeds,
+  \item candidate counts and peak accumulator memory,
+  \item per-\(k\) metrics,
+  \item structured top-\(k\) results,
+  \item elapsed nanoseconds.
+\end{itemize}
+
+\subsection{Primary Metric Definitions}
+
+\begin{center}
+\small
+\begin{tabular}{p{0.36\linewidth}p{0.56\linewidth}}
+\toprule
+Metric & Meaning \\
+\midrule
+\texttt{exact\_bytes\_read} & compressed posting bytes touched by exact lookup \\
+\texttt{postings\_decoded} & logical coordinate postings decoded \\
+\texttt{seeds\_generated} & query k-mers generated before dictionary filtering \\
+\texttt{seeds\_queried} & unique dictionary seeds whose postings were fetched \\
+\texttt{seeds\_skipped\_frequency\_class} & query seeds skipped by class-aware hot policy \\
+\texttt{seeds\_doc\_only\_hot} & hot seeds counted once per candidate rather than per coordinate \\
+\texttt{candidates\_created} & distinct document/sequence/strand accumulator entries \\
+\texttt{elapsed\_ns} & wall-clock query time in nanoseconds \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+These metrics are emitted through TSV and JSONL so experiments can be reproduced and inspected with independent scripts.
+
+\section{Benchmarking}
+
+Benchmarks are stage-labeled as \texttt{exact\_retrieval}. Truth-based top-1, top-5, and top-10 recall are computed when a truth manifest is supplied. Loading mode (\texttt{copy} or \texttt{mmap}), cache size, query budgets, and hot-seed policy are part of the benchmark configuration and must be reported with results.
+
+\section{Limitations}
+
+The current AIMS prototype does not claim to replace an aligner. It does not compute edit distance, CIGAR strings, base-level mapping qualities, splice-aware alignments, or chaining-based final placements. It is a benchmarkable exact k-mer retrieval engine. Its value is in measuring how seed ordering, compressed posting access, and memory-aware lookup affect candidate generation.
+
+\section{Expected Use}
+
+A typical experiment builds an index once, validates it, queries a FASTA or FASTQ workload, and records per-query metrics:
+\begin{verbatim}
+aims_build --ref refs.fa --out idx.aims --k 15,19,23,27,31
+aims_validate --index idx.aims
+aims_query --index idx.aims --query queries.fa --topk 10 --emit jsonl
+aims_bench --index idx.aims --query queries.fa --truth truth.tsv
+\end{verbatim}
+
+The resulting output should be interpreted as exact seed retrieval. Any downstream alignment handoff should be benchmarked and labeled separately.
+
+\end{document}
