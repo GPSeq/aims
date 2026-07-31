@@ -2,6 +2,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -13,6 +14,8 @@
 #include "aims/serialization/index_format.hpp"
 
 namespace {
+
+constexpr std::size_t default_build_chunk_size = 1024;
 
 std::string require_arg(int argc, char** argv, const std::string& name) {
   for (int i = 1; i + 1 < argc; ++i) {
@@ -36,6 +39,8 @@ void print_help(std::ostream& out) {
   out << "Usage: aims_build --ref refs.fa --out index.aims --k 15,19,23,27,31\n"
       << "Builds a checksum-validated KmerExactIndex for exact_retrieval benchmarks.\n"
       << "Options:\n"
+      << "  --chunk-size records\n"
+      << "      Number of input records to read and insert per build chunk (default: 1024).\n"
       << "  --frequency-thresholds rare,medium,hot\n"
       << "      Build-time cf thresholds for rare/medium/hot classes; above hot is very_hot.\n";
 }
@@ -57,6 +62,13 @@ std::vector<std::uint16_t> parse_k_values(const std::string& value) {
   if (unique.empty()) {
     throw std::runtime_error("at least one k value is required");
   }
+
+  std::cout << "Selected K-values: " << std::endl;
+  for (const std::uint16_t& k : unique){
+
+    std::cout << k << " ";
+  } 
+  std::cout << "" << std::endl;
   return {unique.begin(), unique.end()};
 }
 
@@ -81,6 +93,17 @@ aims::build::FrequencyThresholds parse_frequency_thresholds(const std::string& v
       .medium_max = parsed_values[1],
       .hot_max = parsed_values[2],
   };
+}
+
+std::size_t parse_chunk_size(const std::string& value) {
+  const auto parsed = std::stoull(value);
+  if (parsed == 0) {
+    throw std::runtime_error("--chunk-size must be greater than zero");
+  }
+  if (parsed > std::numeric_limits<std::size_t>::max()) {
+    throw std::runtime_error("--chunk-size is too large for this platform");
+  }
+  return static_cast<std::size_t>(parsed);
 }
 
 std::string command_line(int argc, char** argv) {
@@ -123,9 +146,13 @@ int main(int argc, char** argv) {
       build_options.frequency_thresholds =
           parse_frequency_thresholds(require_arg(argc, argv, "--frequency-thresholds"));
     }
-
-    const auto records = aims::io::read_sequences(ref_path);
-    auto index = aims::build::build_kmer_exact(records, k_values, build_options);
+    std::size_t chunk_size = default_build_chunk_size;
+    if (has_flag(argc, argv, "--chunk-size")) {
+      chunk_size = parse_chunk_size(require_arg(argc, argv, "--chunk-size"));
+    }
+    auto index =
+        aims::build::build_kmer_exact_from_sequence_file(ref_path, k_values, build_options,
+                                                         chunk_size);
     index.source_uri = ref_path.string();
     index.source_checksum = "fnv1a64:" + fnv1a_file_checksum(ref_path);
     index.build_command = command_line(argc, argv);
@@ -135,9 +162,11 @@ int main(int argc, char** argv) {
     for (const auto& layer : index.layers) {
       distinct_seeds += layer.dictionary.size();
     }
-    std::cerr << "built KmerExactIndex comparison_stage=exact_retrieval records=" << records.size()
+    std::cerr << "built KmerExactIndex comparison_stage=exact_retrieval records="
+              << index.document_count
               << " layers=" << index.layers.size()
               << " distinct_seeds_total=" << distinct_seeds
+              << " chunk_size=" << chunk_size
               << " frequency_thresholds="
               << build_options.frequency_thresholds.rare_max << ","
               << build_options.frequency_thresholds.medium_max << ","

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <filesystem>
+#include <map>
 #include <span>
 #include <string>
 #include <vector>
@@ -44,6 +46,26 @@ struct KmerExactIndex {
   std::vector<FixedKIndex> layers;
 };
 
+class KmerExactIndexBuilder {
+public:
+  KmerExactIndexBuilder(std::span<const std::uint16_t> k_values,
+                        const KmerBuildOptions& options = {});
+
+  void add_records(std::span<const io::FastaRecord> records);
+  [[nodiscard]] KmerExactIndex finish();
+
+private:
+  struct LayerAccumulator {
+    std::uint16_t k{0};
+    std::map<SeedKey, std::vector<index::Posting>> postings_by_key;
+  };
+
+  KmerBuildOptions options_{};
+  std::uint64_t document_count_{0};
+  std::vector<SequenceMetadata> sequences_{};
+  std::vector<LayerAccumulator> layers_{};
+};
+
 /**
  * @fn build_fixed_k_exact
  * @brief Build one exact canonical k-mer index layer for a single k value.
@@ -73,5 +95,11 @@ struct KmerExactIndex {
     std::span<const io::FastaRecord> records,
     std::span<const std::uint16_t> k_values,
     const KmerBuildOptions& options = {});
+
+[[nodiscard]] KmerExactIndex build_kmer_exact_from_sequence_file(
+    const std::filesystem::path& path,
+    std::span<const std::uint16_t> k_values,
+    const KmerBuildOptions& options = {},
+    std::size_t max_records_per_chunk = 1024);
 
 } // namespace aims::build

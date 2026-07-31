@@ -10,6 +10,7 @@
 #include "aims/codecs/delta_varint.hpp"
 #include "aims/codecs/posting_block_codec.hpp"
 #include "aims/instrumentation/metrics.hpp"
+#include "aims/io/fasta.hpp"
 #include "aims/query/candidate_accumulator.hpp"
 #include "aims/query/kmer_search.hpp"
 #include "aims/query/query_planner.hpp"
@@ -61,6 +62,55 @@ void test_fastq_reader() {
   assert(records[0].name == "q0");
   assert(records[0].sequence == "AACCGGTT");
   assert(records[1].sequence_id == 1);
+}
+
+void test_chunked_sequence_reader_and_streaming_index_build() {
+  const auto path = std::filesystem::temp_directory_path() / "aims_chunked_reader.fa";
+  {
+    std::ofstream out(path);
+    out << ">r0\nAACCGGTT\n>r1\nTTTTAACC\n>r2\nCCCCGGGG\n";
+  }
+
+  std::vector<std::size_t> chunk_sizes;
+  std::vector<std::string> names;
+  aims::io::read_sequence_chunks(path, 2, [&](std::span<const aims::io::FastaRecord> chunk) {
+    chunk_sizes.push_back(chunk.size());
+    for (const auto& record : chunk) {
+      names.push_back(record.name);
+      assert(record.sequence_id == names.size() - 1);
+      assert(record.document_id == names.size() - 1);
+    }
+  });
+  assert((chunk_sizes == std::vector<std::size_t>{2, 1}));
+  assert((names == std::vector<std::string>{"r0", "r1", "r2"}));
+
+  const std::vector<std::uint16_t> k_values = {4, 5};
+  const auto streamed = aims::build::build_kmer_exact_from_sequence_file(path, k_values, {}, 2);
+  const auto records = aims::io::read_sequences(path);
+  const auto in_memory = aims::build::build_kmer_exact(records, k_values);
+  std::filesystem::remove(path);
+
+  assert(streamed.document_count == in_memory.document_count);
+  assert(streamed.sequences.size() == in_memory.sequences.size());
+  assert(streamed.layers.size() == in_memory.layers.size());
+  for (std::size_t layer_index = 0; layer_index < streamed.layers.size(); ++layer_index) {
+    const auto& streamed_layer = streamed.layers[layer_index];
+    const auto& in_memory_layer = in_memory.layers[layer_index];
+    assert(streamed_layer.k == in_memory_layer.k);
+    assert(streamed_layer.dictionary.size() == in_memory_layer.dictionary.size());
+    assert(streamed_layer.postings.size() == in_memory_layer.postings.size());
+    const auto streamed_keys = streamed_layer.dictionary.keys();
+    const auto in_memory_keys = in_memory_layer.dictionary.keys();
+    for (std::size_t seed_index = 0; seed_index < streamed_keys.size(); ++seed_index) {
+      assert(streamed_keys[seed_index] == in_memory_keys[seed_index]);
+      assert(streamed_layer.dictionary.metadata(seed_index).document_frequency ==
+             in_memory_layer.dictionary.metadata(seed_index).document_frequency);
+      assert(streamed_layer.dictionary.metadata(seed_index).collection_frequency ==
+             in_memory_layer.dictionary.metadata(seed_index).collection_frequency);
+      assert(streamed_layer.postings.fetch(seed_index).size() ==
+             in_memory_layer.postings.fetch(seed_index).size());
+    }
+  }
 }
 
 void test_fixed_k_index_and_lookup() {
@@ -437,6 +487,7 @@ void test_kmer_search_frequency_class_hot_policy() {
 int main() {
   test_dna_encoding_and_canonicalization();
   test_fastq_reader();
+  test_chunked_sequence_reader_and_streaming_index_build();
   test_kmer_generation_splits_ambiguous_runs();
   test_fixed_k_index_and_lookup();
   test_configurable_frequency_classes();

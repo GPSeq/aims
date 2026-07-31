@@ -2,8 +2,8 @@
 
 #include <algorithm>
 #include <map>
-#include <set>
 #include <stdexcept>
+#include <utility>
 
 #include "aims/codecs/posting_block_codec.hpp"
 
@@ -28,17 +28,11 @@ FrequencyClass classify_frequency(std::uint64_t cf, const FrequencyThresholds& t
   return FrequencyClass::VeryHot;
 }
 
-} // namespace
+using PostingMap = std::map<SeedKey, std::vector<index::Posting>>;
 
-FixedKIndex build_fixed_k_exact(std::span<const io::FastaRecord> records, std::uint16_t k) {
-  return build_fixed_k_exact(records, k, KmerBuildOptions{});
-}
-
-FixedKIndex build_fixed_k_exact(std::span<const io::FastaRecord> records,
-                                std::uint16_t k,
-                                const KmerBuildOptions& options) {
-  // Group raw positional postings by canonical seed key before building compact arrays.
-  std::map<SeedKey, std::vector<index::Posting>> postings_by_key;
+void collect_fixed_k_postings(PostingMap& postings_by_key,
+                              std::span<const io::FastaRecord> records,
+                              std::uint16_t k) {
   // KmerGenerator owns the DNA canonicalization and ambiguous-base splitting logic.
   seeds::KmerGenerator generator;
   // Phase 1 is k-mer only, canonicalized by default for exact DNA retrieval.
@@ -68,41 +62,61 @@ FixedKIndex build_fixed_k_exact(std::span<const io::FastaRecord> records,
       });
     }
   }
+}
 
+std::uint64_t document_frequency_for_sorted_postings(
+    std::span<const index::Posting> posting_list) {
+  std::uint64_t document_frequency = 0;
+  DocumentId previous_document = 0;
+  bool has_previous = false;
+  for (const auto& posting : posting_list) {
+    if (!has_previous || posting.document_id != previous_document) {
+      ++document_frequency;
+      previous_document = posting.document_id;
+      has_previous = true;
+    }
+  }
+  return document_frequency;
+}
+
+FixedKIndex build_fixed_k_from_postings(PostingMap postings_by_key,
+                                        std::uint16_t k,
+                                        std::uint64_t document_count,
+                                        const KmerBuildOptions& options) {
   // Dictionary keys are stored separately from metadata for fast exact lookup.
   std::vector<SeedKey> keys;
   // Metadata records hold df/cf/cost estimates used by the planner.
   std::vector<index::SeedMetadata> metadata;
-  // Plain posting vectors are retained here before the PostingStore compresses them.
-  std::vector<std::vector<index::Posting>> postings;
+  // Posting blocks are encoded directly as each seed list is finalized.
+  std::vector<std::vector<std::uint8_t>> encoded_blocks;
+  std::vector<std::uint64_t> posting_counts;
   // The codec is used at build time to estimate compressed bytes per seed.
   codecs::PostingBlockCodec posting_codec;
   // Reserve final arrays because the number of unique seeds is already known.
   keys.reserve(postings_by_key.size());
   metadata.reserve(postings_by_key.size());
-  postings.reserve(postings_by_key.size());
+  encoded_blocks.reserve(postings_by_key.size());
+  posting_counts.reserve(postings_by_key.size());
 
   // Convert the ordered map into deterministic dictionary and posting arrays.
   for (auto& [key, posting_list] : postings_by_key) {
     // Sorting is required for deterministic output and delta compression.
     std::sort(posting_list.begin(), posting_list.end());
-    // Document frequency is the number of unique documents containing the seed.
-    std::set<DocumentId> docs;
-    // Collect unique document IDs from the posting list.
-    for (const auto& posting : posting_list) {
-      docs.insert(posting.document_id);
-    }
+    const auto document_frequency = document_frequency_for_sorted_postings(posting_list);
+    const auto collection_frequency = posting_list.size();
+    auto encoded = posting_codec.encode(posting_list);
+    const auto encoded_size = encoded.size();
     // Store this seed key in sorted order.
     keys.push_back(key);
     // Store planner-visible metadata for this seed.
     metadata.push_back(index::SeedMetadata{
-        .document_frequency = docs.size(),
-        .collection_frequency = posting_list.size(),
-        .estimated_posting_bytes = posting_codec.encode(posting_list).size(),
-        .frequency_class = classify_frequency(posting_list.size(), options.frequency_thresholds),
+        .document_frequency = document_frequency,
+        .collection_frequency = collection_frequency,
+        .estimated_posting_bytes = encoded_size,
+        .frequency_class = classify_frequency(collection_frequency, options.frequency_thresholds),
     });
-    // Move the sorted posting list into the store input.
-    postings.push_back(std::move(posting_list));
+    posting_counts.push_back(collection_frequency);
+    encoded_blocks.push_back(std::move(encoded));
   }
 
   // Assemble the fixed-k index layer.
@@ -110,12 +124,76 @@ FixedKIndex build_fixed_k_exact(std::span<const io::FastaRecord> records,
   // Record the k value so query metrics and serialization can label this layer.
   index.k = k;
   // In this prototype each input record is treated as one document.
-  index.document_count = records.size();
+  index.document_count = document_count;
   // Build the exact dictionary with deterministic keys and metadata.
   index.dictionary.build(std::move(keys), std::move(metadata));
-  // Build and compress the posting store.
-  index.postings.build(std::move(postings));
+  // Build the posting store from already compressed blocks.
+  index.postings.build_encoded(std::move(encoded_blocks), std::move(posting_counts));
   // Return a complete exact retrieval layer.
+  return index;
+}
+
+} // namespace
+
+FixedKIndex build_fixed_k_exact(std::span<const io::FastaRecord> records, std::uint16_t k) {
+  return build_fixed_k_exact(records, k, KmerBuildOptions{});
+}
+
+FixedKIndex build_fixed_k_exact(std::span<const io::FastaRecord> records,
+                                std::uint16_t k,
+                                const KmerBuildOptions& options) {
+  // Group raw positional postings by canonical seed key before building compact arrays.
+  PostingMap postings_by_key;
+  collect_fixed_k_postings(postings_by_key, records, k);
+  return build_fixed_k_from_postings(std::move(postings_by_key), k, records.size(), options);
+}
+
+KmerExactIndexBuilder::KmerExactIndexBuilder(std::span<const std::uint16_t> k_values,
+                                             const KmerBuildOptions& options)
+    : options_(options) {
+  // Multi-k indexes need at least one layer to be meaningful.
+  if (k_values.empty()) {
+    throw std::invalid_argument("at least one k value is required");
+  }
+  layers_.reserve(k_values.size());
+  for (const auto k : k_values) {
+    layers_.push_back(LayerAccumulator{.k = k});
+  }
+}
+
+void KmerExactIndexBuilder::add_records(std::span<const io::FastaRecord> records) {
+  if (records.empty()) {
+    return;
+  }
+  sequences_.reserve(sequences_.size() + records.size());
+  for (const auto& record : records) {
+    sequences_.push_back(SequenceMetadata{
+        .document_id = record.document_id,
+        .sequence_id = record.sequence_id,
+        .name = record.name,
+        .length = record.sequence.size(),
+    });
+  }
+  document_count_ += records.size();
+  for (auto& layer : layers_) {
+    collect_fixed_k_postings(layer.postings_by_key, records, layer.k);
+  }
+}
+
+KmerExactIndex KmerExactIndexBuilder::finish() {
+  // The top-level index stores shared sequence metadata plus one layer per k.
+  KmerExactIndex index;
+  // Record document count once for planner IDF calculations.
+  index.document_count = document_count_;
+  index.sequences = std::move(sequences_);
+  // Allocate all requested k layers.
+  index.layers.reserve(layers_.size());
+  // Build each fixed-k layer independently so ablation and per-k metrics remain clean.
+  for (auto& layer : layers_) {
+    index.layers.push_back(build_fixed_k_from_postings(std::move(layer.postings_by_key), layer.k,
+                                                       document_count_, options_));
+  }
+  // Return the complete multi-k exact index.
   return index;
 }
 
@@ -127,33 +205,21 @@ KmerExactIndex build_kmer_exact(std::span<const io::FastaRecord> records,
 KmerExactIndex build_kmer_exact(std::span<const io::FastaRecord> records,
                                 std::span<const std::uint16_t> k_values,
                                 const KmerBuildOptions& options) {
-  // Multi-k indexes need at least one layer to be meaningful.
-  if (k_values.empty()) {
-    throw std::invalid_argument("at least one k value is required");
-  }
-  // The top-level index stores shared sequence metadata plus one layer per k.
-  KmerExactIndex index;
-  // Record document count once for planner IDF calculations.
-  index.document_count = records.size();
-  // Sequence metadata is copied from input records for output result names and validation.
-  index.sequences.reserve(records.size());
-  // Preserve every sequence ID/name/length in deterministic input order.
-  for (const auto& record : records) {
-    index.sequences.push_back(SequenceMetadata{
-        .document_id = record.document_id,
-        .sequence_id = record.sequence_id,
-        .name = record.name,
-        .length = record.sequence.size(),
-    });
-  }
-  // Allocate all requested k layers.
-  index.layers.reserve(k_values.size());
-  // Build each fixed-k layer independently so ablation and per-k metrics remain clean.
-  for (const auto k : k_values) {
-    index.layers.push_back(build_fixed_k_exact(records, k, options));
-  }
-  // Return the complete multi-k exact index.
-  return index;
+  KmerExactIndexBuilder builder(k_values, options);
+  builder.add_records(records);
+  return builder.finish();
+}
+
+KmerExactIndex build_kmer_exact_from_sequence_file(const std::filesystem::path& path,
+                                                  std::span<const std::uint16_t> k_values,
+                                                  const KmerBuildOptions& options,
+                                                  std::size_t max_records_per_chunk) {
+  KmerExactIndexBuilder builder(k_values, options);
+  io::read_sequence_chunks(path, max_records_per_chunk,
+                           [&](std::span<const io::FastaRecord> records) {
+                             builder.add_records(records);
+                           });
+  return builder.finish();
 }
 
 } // namespace aims::build

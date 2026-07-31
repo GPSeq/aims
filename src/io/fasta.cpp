@@ -1,50 +1,104 @@
 #include "aims/io/fasta.hpp"
 
 #include <fstream>
+#include <limits>
 #include <stdexcept>
 
 namespace aims::io {
+namespace {
 
-std::vector<FastaRecord> read_fasta(const std::filesystem::path& path) {
+FastaRecord make_record(std::string name, std::string sequence, std::uint64_t id) {
+  if (id > std::numeric_limits<DocumentId>::max()) {
+    throw std::runtime_error("too many sequence records for 32-bit document identifiers");
+  }
+  return FastaRecord{
+      .name = std::move(name),
+      .sequence = std::move(sequence),
+      .document_id = static_cast<DocumentId>(id),
+      .sequence_id = id,
+  };
+}
+
+void flush_chunk(std::vector<FastaRecord>& chunk, const FastaRecordChunkVisitor& visitor) {
+  if (chunk.empty()) {
+    return;
+  }
+  visitor(chunk);
+  chunk.clear();
+}
+
+void reserve_chunk_capacity(std::vector<FastaRecord>& chunk, std::size_t max_records_per_chunk) {
+  constexpr std::size_t max_eager_reserve = 65536;
+  if (max_records_per_chunk <= max_eager_reserve) {
+    chunk.reserve(max_records_per_chunk);
+  }
+}
+
+void append_record(std::vector<FastaRecord>& chunk,
+                   const FastaRecordChunkVisitor& visitor,
+                   std::size_t max_records_per_chunk,
+                   std::string name,
+                   std::string sequence,
+                   std::uint64_t& next_id) {
+  chunk.push_back(make_record(std::move(name), std::move(sequence), next_id));
+  ++next_id;
+  if (chunk.size() >= max_records_per_chunk) {
+    flush_chunk(chunk, visitor);
+  }
+}
+
+void read_fasta_chunks(const std::filesystem::path& path,
+                       std::size_t max_records_per_chunk,
+                       const FastaRecordChunkVisitor& visitor) {
   std::ifstream in(path);
   if (!in) {
     throw std::runtime_error("failed to open FASTA: " + path.string());
   }
 
-  std::vector<FastaRecord> records;
-  FastaRecord current;
+  std::vector<FastaRecord> chunk;
+  reserve_chunk_capacity(chunk, max_records_per_chunk);
+  std::uint64_t next_id = 0;
+  std::string name;
+  std::string sequence;
   std::string line;
+  bool has_record = false;
   while (std::getline(in, line)) {
     if (line.empty()) {
       continue;
     }
     if (line.front() == '>') {
-      if (!current.name.empty()) {
-        current.sequence_id = records.size();
-        current.document_id = static_cast<DocumentId>(records.size());
-        records.push_back(std::move(current));
-        current = FastaRecord{};
+      if (has_record) {
+        append_record(chunk, visitor, max_records_per_chunk, std::move(name), std::move(sequence),
+                      next_id);
+        sequence.clear();
       }
-      current.name = line.substr(1);
+      name = line.substr(1);
+      has_record = true;
     } else {
-      current.sequence += line;
+      if (!has_record) {
+        throw std::runtime_error("FASTA sequence data before header in: " + path.string());
+      }
+      sequence += line;
     }
   }
-  if (!current.name.empty()) {
-    current.sequence_id = records.size();
-    current.document_id = static_cast<DocumentId>(records.size());
-    records.push_back(std::move(current));
+  if (has_record) {
+    append_record(chunk, visitor, max_records_per_chunk, std::move(name), std::move(sequence),
+                  next_id);
   }
-  return records;
+  flush_chunk(chunk, visitor);
 }
 
-std::vector<FastaRecord> read_fastq(const std::filesystem::path& path) {
+void read_fastq_chunks(const std::filesystem::path& path,
+                       std::size_t max_records_per_chunk,
+                       const FastaRecordChunkVisitor& visitor) {
   std::ifstream in(path);
   if (!in) {
     throw std::runtime_error("failed to open FASTQ: " + path.string());
   }
 
-  std::vector<FastaRecord> records;
+  std::vector<FastaRecord> chunk;
+  reserve_chunk_capacity(chunk, max_records_per_chunk);
+  std::uint64_t next_id = 0;
   std::string name;
   std::string sequence;
   std::string plus;
@@ -65,29 +119,67 @@ std::vector<FastaRecord> read_fastq(const std::filesystem::path& path) {
     if (quality.size() != sequence.size()) {
       throw std::runtime_error("FASTQ quality length mismatch in: " + path.string());
     }
-    const auto id = records.size();
-    records.push_back(FastaRecord{
-        .name = name.substr(1),
-        .sequence = sequence,
-        .document_id = static_cast<DocumentId>(id),
-        .sequence_id = id,
-    });
+    append_record(chunk, visitor, max_records_per_chunk, name.substr(1), std::move(sequence),
+                  next_id);
   }
-  return records;
+  flush_chunk(chunk, visitor);
 }
 
-std::vector<FastaRecord> read_sequences(const std::filesystem::path& path) {
+char detect_sequence_format(const std::filesystem::path& path) {
   std::ifstream in(path);
   if (!in) {
     throw std::runtime_error("failed to open sequence file: " + path.string());
   }
   char first = '\0';
   in >> first;
+  return first;
+}
+
+} // namespace
+
+std::vector<FastaRecord> read_fasta(const std::filesystem::path& path) {
+  std::vector<FastaRecord> records;
+  read_fasta_chunks(path, std::numeric_limits<std::size_t>::max(),
+                    [&](std::span<const FastaRecord> chunk) {
+                      records.insert(records.end(), chunk.begin(), chunk.end());
+                    });
+  return records;
+}
+
+std::vector<FastaRecord> read_fastq(const std::filesystem::path& path) {
+  std::vector<FastaRecord> records;
+  read_fastq_chunks(path, std::numeric_limits<std::size_t>::max(),
+                    [&](std::span<const FastaRecord> chunk) {
+                      records.insert(records.end(), chunk.begin(), chunk.end());
+                    });
+  return records;
+}
+
+std::vector<FastaRecord> read_sequences(const std::filesystem::path& path) {
+  const char first = detect_sequence_format(path);
   if (first == '>') {
     return read_fasta(path);
   }
   if (first == '@') {
     return read_fastq(path);
+  }
+  throw std::runtime_error("unknown sequence file format: " + path.string());
+}
+
+void read_sequence_chunks(const std::filesystem::path& path,
+                          std::size_t max_records_per_chunk,
+                          const FastaRecordChunkVisitor& visitor) {
+  if (max_records_per_chunk == 0) {
+    throw std::invalid_argument("max_records_per_chunk must be greater than zero");
+  }
+  const char first = detect_sequence_format(path);
+  if (first == '>') {
+    read_fasta_chunks(path, max_records_per_chunk, visitor);
+    return;
+  }
+  if (first == '@') {
+    read_fastq_chunks(path, max_records_per_chunk, visitor);
+    return;
   }
   throw std::runtime_error("unknown sequence file format: " + path.string());
 }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <filesystem>
+#include <functional>
 #include <span>
 #include <string>
 #include <vector>
@@ -15,6 +16,8 @@ struct FastaRecord {
   DocumentId document_id{0};
   SequenceId sequence_id{0};
 };
+
+using FastaRecordChunkVisitor = std::function<void(std::span<const FastaRecord>)>;
 
 /**
  * @fn read_fasta
@@ -45,6 +48,9 @@ struct FastaRecord {
  * @return Sequence records suitable for indexing or querying.
  */
 [[nodiscard]] std::vector<FastaRecord> read_sequences(const std::filesystem::path& path);
+void read_sequence_chunks(const std::filesystem::path& path,
+                          std::size_t max_records_per_chunk,
+                          const FastaRecordChunkVisitor& visitor);
 void write_fasta(const std::filesystem::path& path, std::span<const FastaRecord> records);
 
 } // namespace aims::io
