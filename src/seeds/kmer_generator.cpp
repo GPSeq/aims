@@ -1,49 +1,11 @@
 #include "aims/seeds/kmer_generator.hpp"
 
 #include <cassert>
+#include <limits>
 
 #include "aims/seeds/dna.hpp"
 
 namespace aims::seeds {
-namespace {
-
-// Emit all valid k-mers from one contiguous unambiguous DNA run.
-void flush_run(std::vector<SeedOccurrence>& out,
-               std::string_view bases,
-               Position run_start,
-               SequenceView sequence,
-               const SeedGenerationParams& params) {
-  // A zero k or a run shorter than k cannot produce seeds.
-  if (params.k == 0 || bases.size() < params.k) {
-    return;
-  }
-  // This implementation is intentionally k-mer-only.
-  assert(params.family == SeedFamily::Kmer);
-
-  // Slide a window of length k across the valid run.
-  for (std::size_t offset = 0; offset + params.k <= bases.size(); ++offset) {
-    // The current k-mer view avoids copying sequence characters.
-    const auto kmer = bases.substr(offset, params.k);
-    // Canonical mode chooses min(forward, reverse-complement) and records strand.
-    const auto canonical = params.canonical ? canonical_kmer(kmer)
-                                            : CanonicalSeed{forward_kmer(kmer), Strand::Forward};
-    // Invalid means an ambiguous base slipped through, so skip defensively.
-    if (canonical.value == invalid_seed) {
-      continue;
-    }
-    // Record the seed key, reference IDs, sequence-local coordinate, and strand.
-    out.push_back(SeedOccurrence{
-        .key = SeedKey{.value = canonical.value, .family = params.family, .k = params.k},
-        .document_id = sequence.document_id,
-        .sequence_id = sequence.sequence_id,
-        .position = run_start + offset,
-        .strand = canonical.strand,
-    });
-  }
-}
-
-} // namespace
-
 std::vector<SeedOccurrence>
 KmerGenerator::generate(SequenceView sequence, const SeedGenerationParams& params) const {
   // The two-bit representation fits k <= 32 inside a uint64_t.
@@ -54,33 +16,47 @@ KmerGenerator::generate(SequenceView sequence, const SeedGenerationParams& param
   if (params.k == 0 || !can_encode_k(params.k)) {
     return out;
   }
+  out.reserve(sequence.bases.size() >= params.k ? sequence.bases.size() - params.k + 1U : 0U);
 
-  // run_begin marks the start of the current A/C/G/T-only segment.
-  std::size_t run_begin = 0;
-  // in_run tells whether the scan is currently inside a valid DNA segment.
-  bool in_run = false;
-  // Scan every base so ambiguous characters split seed extraction.
+  const auto shift = static_cast<unsigned>(2U * (params.k - 1U));
+  const EncodedSeed mask =
+      params.k == 32 ? std::numeric_limits<EncodedSeed>::max()
+                     : ((EncodedSeed{1} << static_cast<unsigned>(2U * params.k)) - 1U);
+
+  EncodedSeed forward = 0;
+  EncodedSeed reverse = 0;
+  std::size_t valid_bases = 0;
+
+  // Scan every base so ambiguous characters split seed extraction. Forward and reverse-complement
+  // encodings are maintained as rolling values instead of re-encoding each overlapping window.
   for (std::size_t i = 0; i < sequence.bases.size(); ++i) {
-    // Valid DNA bases extend or start a run.
-    if (encode_base(sequence.bases[i]).has_value()) {
-      // Starting a new run records its coordinate in the original sequence.
-      if (!in_run) {
-        run_begin = i;
-        in_run = true;
-      }
-    // An ambiguous base closes the current run.
-    } else if (in_run) {
-      // Emit k-mers from the run before the ambiguous base.
-      flush_run(out, sequence.bases.substr(run_begin, i - run_begin),
-                static_cast<Position>(run_begin), sequence, params);
-      // The scan is now outside a valid run.
-      in_run = false;
+    const auto bits = encode_base(sequence.bases[i]);
+    if (!bits.has_value()) {
+      forward = 0;
+      reverse = 0;
+      valid_bases = 0;
+      continue;
     }
-  }
-  // If the sequence ended inside a valid run, flush the final segment.
-  if (in_run) {
-    flush_run(out, sequence.bases.substr(run_begin),
-              static_cast<Position>(run_begin), sequence, params);
+
+    forward = ((forward << 2U) | static_cast<EncodedSeed>(*bits)) & mask;
+    reverse = (reverse >> 2U) |
+              (static_cast<EncodedSeed>(complement_bits(*bits)) << shift);
+    ++valid_bases;
+    if (valid_bases < params.k) {
+      continue;
+    }
+
+    const auto canonical =
+        params.canonical && reverse < forward
+            ? CanonicalSeed{.value = reverse, .strand = Strand::Reverse}
+            : CanonicalSeed{.value = forward, .strand = Strand::Forward};
+    out.push_back(SeedOccurrence{
+        .key = SeedKey{.value = canonical.value, .family = params.family, .k = params.k},
+        .document_id = sequence.document_id,
+        .sequence_id = sequence.sequence_id,
+        .position = static_cast<Position>(i + 1U - params.k),
+        .strand = canonical.strand,
+    });
   }
   // Return all exact seed occurrences for this sequence.
   return out;

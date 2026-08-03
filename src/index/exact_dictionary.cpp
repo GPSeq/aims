@@ -11,24 +11,29 @@ void SortedArrayDictionary::build(std::vector<SeedKey> keys, std::vector<SeedMet
     throw std::invalid_argument("dictionary keys and metadata must have equal length");
   }
 
-  std::vector<std::size_t> order(keys.size());
-  for (std::size_t i = 0; i < order.size(); ++i) {
-    order[i] = i;
-  }
-  std::sort(order.begin(), order.end(), [&](std::size_t lhs, std::size_t rhs) {
-    return keys[lhs] < keys[rhs];
-  });
+  if (std::is_sorted(keys.begin(), keys.end())) {
+    keys_ = std::move(keys);
+    metadata_ = std::move(metadata);
+  } else {
+    std::vector<std::size_t> order(keys.size());
+    for (std::size_t i = 0; i < order.size(); ++i) {
+      order[i] = i;
+    }
+    std::sort(order.begin(), order.end(), [&](std::size_t lhs, std::size_t rhs) {
+      return keys[lhs] < keys[rhs];
+    });
 
-  std::vector<SeedKey> sorted_keys;
-  std::vector<SeedMetadata> sorted_metadata;
-  sorted_keys.reserve(keys.size());
-  sorted_metadata.reserve(metadata.size());
-  for (const std::size_t idx : order) {
-    sorted_keys.push_back(keys[idx]);
-    sorted_metadata.push_back(metadata[idx]);
+    std::vector<SeedKey> sorted_keys;
+    std::vector<SeedMetadata> sorted_metadata;
+    sorted_keys.reserve(keys.size());
+    sorted_metadata.reserve(metadata.size());
+    for (const std::size_t idx : order) {
+      sorted_keys.push_back(keys[idx]);
+      sorted_metadata.push_back(metadata[idx]);
+    }
+    keys_ = std::move(sorted_keys);
+    metadata_ = std::move(sorted_metadata);
   }
-  keys_ = std::move(sorted_keys);
-  metadata_ = std::move(sorted_metadata);
   id_index_.clear();
   id_index_.reserve(keys_.size());
   for (std::size_t i = 0; i < keys_.size(); ++i) {

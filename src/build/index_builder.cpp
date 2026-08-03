@@ -1,8 +1,8 @@
 #include "aims/build/index_builder.hpp"
 
 #include <algorithm>
-#include <map>
 #include <stdexcept>
+#include <unordered_map>
 #include <utility>
 
 #include "aims/codecs/posting_block_codec.hpp"
@@ -28,7 +28,7 @@ FrequencyClass classify_frequency(std::uint64_t cf, const FrequencyThresholds& t
   return FrequencyClass::VeryHot;
 }
 
-using PostingMap = std::map<SeedKey, std::vector<index::Posting>>;
+using PostingMap = std::unordered_map<SeedKey, std::vector<index::Posting>>;
 
 void collect_fixed_k_postings(PostingMap& postings_by_key,
                               std::span<const io::FastaRecord> records,
@@ -98,10 +98,23 @@ FixedKIndex build_fixed_k_from_postings(PostingMap postings_by_key,
   encoded_blocks.reserve(postings_by_key.size());
   posting_counts.reserve(postings_by_key.size());
 
-  // Convert the ordered map into deterministic dictionary and posting arrays.
+  std::vector<std::pair<SeedKey, std::vector<index::Posting>*>> ordered_postings;
+  ordered_postings.reserve(postings_by_key.size());
   for (auto& [key, posting_list] : postings_by_key) {
+    ordered_postings.push_back({key, &posting_list});
+  }
+  std::sort(ordered_postings.begin(), ordered_postings.end(),
+            [](const auto& lhs, const auto& rhs) {
+              return lhs.first < rhs.first;
+            });
+
+  // Convert the hash accumulator into deterministic dictionary and posting arrays.
+  for (auto& [key, posting_list_ptr] : ordered_postings) {
+    auto& posting_list = *posting_list_ptr;
     // Sorting is required for deterministic output and delta compression.
-    std::sort(posting_list.begin(), posting_list.end());
+    if (!std::is_sorted(posting_list.begin(), posting_list.end())) {
+      std::sort(posting_list.begin(), posting_list.end());
+    }
     const auto document_frequency = document_frequency_for_sorted_postings(posting_list);
     const auto collection_frequency = posting_list.size();
     auto encoded = posting_codec.encode(posting_list);

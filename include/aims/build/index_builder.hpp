@@ -1,9 +1,9 @@
 #pragma once
 
 #include <filesystem>
-#include <map>
 #include <span>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "aims/index/exact_dictionary.hpp"
@@ -57,7 +57,7 @@ public:
 private:
   struct LayerAccumulator {
     std::uint16_t k{0};
-    std::map<SeedKey, std::vector<index::Posting>> postings_by_key;
+    std::unordered_map<SeedKey, std::vector<index::Posting>> postings_by_key;
   };
 
   KmerBuildOptions options_{};
