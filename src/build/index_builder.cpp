@@ -1,6 +1,8 @@
 #include "aims/build/index_builder.hpp"
 
 #include <algorithm>
+#include <cstdint>
+#include <limits>
 #include <stdexcept>
 #include <unordered_map>
 #include <utility>
@@ -29,6 +31,27 @@ FrequencyClass classify_frequency(std::uint64_t cf, const FrequencyThresholds& t
 }
 
 using PostingMap = std::unordered_map<SeedKey, std::vector<index::Posting>>;
+
+void validate_thread_count(const KmerBuildOptions& options) {
+  if (options.thread_count == 0) {
+    throw std::invalid_argument("thread_count must be greater than zero");
+  }
+  if (options.thread_count > static_cast<std::uint32_t>(std::numeric_limits<int>::max())) {
+    throw std::invalid_argument("thread_count is too large for OpenMP");
+  }
+#ifndef AIMS_HAS_OPENMP
+  if (options.thread_count > 1) {
+    throw std::invalid_argument("--threads requires configuring with AIMS_ENABLE_OPENMP=ON");
+  }
+#endif
+}
+
+std::int64_t checked_parallel_layer_count(std::size_t size) {
+  if (size > static_cast<std::size_t>(std::numeric_limits<std::int64_t>::max())) {
+    throw std::runtime_error("too many index layers");
+  }
+  return static_cast<std::int64_t>(size);
+}
 
 void collect_fixed_k_postings(PostingMap& postings_by_key,
                               std::span<const io::FastaRecord> records,
@@ -155,6 +178,7 @@ FixedKIndex build_fixed_k_exact(std::span<const io::FastaRecord> records, std::u
 FixedKIndex build_fixed_k_exact(std::span<const io::FastaRecord> records,
                                 std::uint16_t k,
                                 const KmerBuildOptions& options) {
+  validate_thread_count(options);
   // Group raw positional postings by canonical seed key before building compact arrays.
   PostingMap postings_by_key;
   collect_fixed_k_postings(postings_by_key, records, k);
@@ -164,6 +188,7 @@ FixedKIndex build_fixed_k_exact(std::span<const io::FastaRecord> records,
 KmerExactIndexBuilder::KmerExactIndexBuilder(std::span<const std::uint16_t> k_values,
                                              const KmerBuildOptions& options)
     : options_(options) {
+  validate_thread_count(options_);
   // Multi-k indexes need at least one layer to be meaningful.
   if (k_values.empty()) {
     throw std::invalid_argument("at least one k value is required");
@@ -188,7 +213,13 @@ void KmerExactIndexBuilder::add_records(std::span<const io::FastaRecord> records
     });
   }
   document_count_ += records.size();
-  for (auto& layer : layers_) {
+  const auto layer_count = checked_parallel_layer_count(layers_.size());
+#ifdef AIMS_HAS_OPENMP
+#pragma omp parallel for schedule(static) num_threads(static_cast<int>(options_.thread_count)) \
+    if (options_.thread_count > 1 && layers_.size() > 1)
+#endif
+  for (std::int64_t i = 0; i < layer_count; ++i) {
+    auto& layer = layers_[static_cast<std::size_t>(i)];
     collect_fixed_k_postings(layer.postings_by_key, records, layer.k);
   }
 }
@@ -200,11 +231,18 @@ KmerExactIndex KmerExactIndexBuilder::finish() {
   index.document_count = document_count_;
   index.sequences = std::move(sequences_);
   // Allocate all requested k layers.
-  index.layers.reserve(layers_.size());
+  index.layers.resize(layers_.size());
   // Build each fixed-k layer independently so ablation and per-k metrics remain clean.
-  for (auto& layer : layers_) {
-    index.layers.push_back(build_fixed_k_from_postings(std::move(layer.postings_by_key), layer.k,
-                                                       document_count_, options_));
+  const auto layer_count = checked_parallel_layer_count(layers_.size());
+#ifdef AIMS_HAS_OPENMP
+#pragma omp parallel for schedule(static) num_threads(static_cast<int>(options_.thread_count)) \
+    if (options_.thread_count > 1 && layers_.size() > 1)
+#endif
+  for (std::int64_t i = 0; i < layer_count; ++i) {
+    auto& layer = layers_[static_cast<std::size_t>(i)];
+    index.layers[static_cast<std::size_t>(i)] =
+        build_fixed_k_from_postings(std::move(layer.postings_by_key), layer.k, document_count_,
+                                    options_);
   }
   // Return the complete multi-k exact index.
   return index;

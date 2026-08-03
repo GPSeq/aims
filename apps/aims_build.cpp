@@ -1,3 +1,4 @@
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -42,7 +43,9 @@ void print_help(std::ostream& out) {
       << "  --chunk-size records\n"
       << "      Number of input records to read and insert per build chunk (default: 1024).\n"
       << "  --frequency-thresholds rare,medium,hot\n"
-      << "      Build-time cf thresholds for rare/medium/hot classes; above hot is very_hot.\n";
+      << "      Build-time cf thresholds for rare/medium/hot classes; above hot is very_hot.\n"
+      << "  --threads n\n"
+      << "      Number of OpenMP worker threads for independent k layers (default: 1).\n";
 }
 
 std::vector<std::uint16_t> parse_k_values(const std::string& value) {
@@ -106,6 +109,17 @@ std::size_t parse_chunk_size(const std::string& value) {
   return static_cast<std::size_t>(parsed);
 }
 
+std::uint32_t parse_thread_count(const std::string& value) {
+  const auto parsed = std::stoull(value);
+  if (parsed == 0) {
+    throw std::runtime_error("--threads must be greater than zero");
+  }
+  if (parsed > std::numeric_limits<std::uint32_t>::max()) {
+    throw std::runtime_error("--threads is too large for this platform");
+  }
+  return static_cast<std::uint32_t>(parsed);
+}
+
 std::string command_line(int argc, char** argv) {
   std::ostringstream out;
   for (int i = 0; i < argc; ++i) {
@@ -146,6 +160,9 @@ int main(int argc, char** argv) {
       build_options.frequency_thresholds =
           parse_frequency_thresholds(require_arg(argc, argv, "--frequency-thresholds"));
     }
+    if (has_flag(argc, argv, "--threads")) {
+      build_options.thread_count = parse_thread_count(require_arg(argc, argv, "--threads"));
+    }
     std::size_t chunk_size = default_build_chunk_size;
     if (has_flag(argc, argv, "--chunk-size")) {
       chunk_size = parse_chunk_size(require_arg(argc, argv, "--chunk-size"));
@@ -171,6 +188,7 @@ int main(int argc, char** argv) {
               << build_options.frequency_thresholds.rare_max << ","
               << build_options.frequency_thresholds.medium_max << ","
               << build_options.frequency_thresholds.hot_max
+              << " threads=" << build_options.thread_count
               << " k_values=";
     for (std::size_t i = 0; i < k_values.size(); ++i) {
       std::cerr << (i == 0 ? "" : ",") << k_values[i];

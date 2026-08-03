@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -76,6 +77,7 @@ bool has_flag(int argc, char** argv, const std::string& name) {
 void print_help(std::ostream& out) {
   out << "Usage: aims_bench --ref refs.fa --query queries.fa --k 15,19 [--topk 10] [--truth truth.tsv]\n"
       << "       [--mmap] [--posting-cache-blocks N]\n"
+      << "       [--threads N]\n"
       << "       [--repeats N] [--query-metrics-out metrics.jsonl]\n"
       << "       [--max-seeds N] [--max-postings N] [--max-candidates N]\n"
       << "       [--hot-seed-threshold N] [--hot-seed-class hot|very-hot] [--hot-mode skip|doc-only]\n"
@@ -100,6 +102,17 @@ std::vector<std::uint16_t> parse_k_values(const std::string& value) {
     throw std::runtime_error("at least one k value is required");
   }
   return {unique.begin(), unique.end()};
+}
+
+std::uint32_t parse_thread_count(const std::string& value) {
+  const auto parsed = std::stoull(value);
+  if (parsed == 0) {
+    throw std::runtime_error("--threads must be greater than zero");
+  }
+  if (parsed > std::numeric_limits<std::uint32_t>::max()) {
+    throw std::runtime_error("--threads is too large for this platform");
+  }
+  return static_cast<std::uint32_t>(parsed);
 }
 
 std::string escape_json(const std::string& value) {
@@ -274,6 +287,7 @@ int main(int argc, char** argv) {
     const auto posting_cache_blocks =
         std::stoull(arg_or(argc, argv, "--posting-cache-blocks", "0"));
     const auto repeats = std::max<std::uint64_t>(1, std::stoull(arg_or(argc, argv, "--repeats", "1")));
+    const auto threads = parse_thread_count(arg_or(argc, argv, "--threads", "1"));
     const auto query_metrics_out = arg_or(argc, argv, "--query-metrics-out", "");
     const bool budgeted_run = max_seeds != 0 || max_postings != 0 || max_candidates != 0 ||
                               hot_seed_threshold != 0 || !hot_seed_class_arg.empty();
@@ -284,7 +298,10 @@ int main(int argc, char** argv) {
 
     const auto build_cpu_start = process_cpu_ms();
     const auto build_start = std::chrono::steady_clock::now();
-    auto index = aims::build::build_kmer_exact(records, k_values);
+    auto index = aims::build::build_kmer_exact(records, k_values,
+                                               aims::build::KmerBuildOptions{
+                                                   .thread_count = threads,
+                                               });
     index.source_uri = ref_path.string();
     index.source_checksum = reference_checksum;
     index.build_command = command_line(argc, argv);

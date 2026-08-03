@@ -7,6 +7,7 @@ project(AIMS
 
 option(AIMS_ENABLE_ASAN "Enable AddressSanitizer and UndefinedBehaviorSanitizer in Debug builds" ON)
 option(AIMS_ENABLE_LTO "Enable interprocedural optimization for Release builds when supported" OFF)
+option(AIMS_ENABLE_OPENMP "Enable OpenMP parallel index-building support" OFF)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -15,6 +16,10 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 include(CheckIPOSupported)
 include(CTest)
+
+if(AIMS_ENABLE_OPENMP)
+  find_package(OpenMP REQUIRED)
+endif()
 
 find_package(Doxygen QUIET)
 find_program(LATEXMK_EXECUTABLE latexmk)
@@ -39,6 +44,11 @@ target_include_directories(aims PUBLIC
   $<INSTALL_INTERFACE:include>)
 
 target_compile_features(aims PUBLIC cxx_std_20)
+
+if(AIMS_ENABLE_OPENMP)
+  target_link_libraries(aims PUBLIC OpenMP::OpenMP_CXX)
+  target_compile_definitions(aims PUBLIC AIMS_HAS_OPENMP=1)
+endif()
 
 if(MSVC)
   target_compile_options(aims PRIVATE /W4 /permissive-)

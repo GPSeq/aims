@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
 #include <span>
 #include <string>
@@ -21,6 +22,7 @@ struct FrequencyThresholds {
 
 struct KmerBuildOptions {
   FrequencyThresholds frequency_thresholds{};
+  std::uint32_t thread_count{1};
 };
 
 struct FixedKIndex {

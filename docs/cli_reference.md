@@ -5,13 +5,15 @@ All current commands are k-mer exact-retrieval tools. They do not perform alignm
 ## Build
 
 ```sh
-aims_build --ref refs.fa --out index.aims --k 15,19,23,27,31
+aims_build --ref refs.fa --out index.aims --k 15,19,23,27,31 --threads 5
 aims_build --ref refs.fa --out index.aims --k 15,19,23 --frequency-thresholds 2,16,128
 ```
 
 Inputs may be FASTA or FASTQ. The index stores source URI, an FNV-1a file checksum, build command, sequence names, sequence lengths, compressed posting blocks, and per-k dictionaries.
 
 `--frequency-thresholds rare,medium,hot` controls build-time collection-frequency classes. Seeds with `cf <= rare` are rare, `cf <= medium` are medium, `cf <= hot` are hot, and larger seeds are very-hot. These classes are stored in the index metadata.
+
+`--threads N` parallelizes independent k layers during build. Values above `1` require configuring the project with `AIMS_ENABLE_OPENMP=ON`.
 
 ## Query
 
@@ -38,7 +40,7 @@ Important options:
 ## Benchmark
 
 ```sh
-aims_bench --ref refs.fa --query queries.fa --truth truth.tsv --k 15,19,23 --topk 10
+aims_bench --ref refs.fa --query queries.fa --truth truth.tsv --k 15,19,23 --topk 10 --threads 3
 ```
 
 Useful benchmark options:
@@ -46,6 +48,7 @@ Useful benchmark options:
 ```text
 --mmap
 --posting-cache-blocks N
+--threads N
 --repeats N
 --query-metrics-out query_metrics.jsonl
 --max-seeds N
@@ -56,7 +59,7 @@ Useful benchmark options:
 --hot-mode skip|doc-only
 ```
 
-`aims_bench` emits one `BenchmarkResult` JSON object. When truth is provided, it reports top-1/top-5/top-10 recall. Load time, build time, query time, RSS, bytes read per query, and postings decoded per query are reported separately.
+`aims_bench` emits one `BenchmarkResult` JSON object. When truth is provided, it reports top-1/top-5/top-10 recall. Load time, build time, query time, RSS, bytes read per query, and postings decoded per query are reported separately. `--threads` controls the internal index build and has the same OpenMP requirement as `aims_build`.
 
 ## Inspect And Validate
 
