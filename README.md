@@ -1,7 +1,6 @@
 # AIMS (Adaptive Information-per-Memory-access Seed Index)
 
-[![CI](https://github.com/GPSeq/aims/actions/workflows/ci.yml/badge.svg)](https://github.com/GPSeq/aims/actions/workflows/ci.yml)
-
+[![CI](https://github.com/GPSeq/aims/actions/workflows/cmake-single-platform.yml/badge.svg)](https://github.com/GPSeq/aims/actions/workflows/cmake-single-platform.yml)  
 AIMS is a C++20 research system for exact and adaptive biological sequence retrieval over large redundant DNA collections.
 
 The current implementation is a stage-matched exact retrieval baseline. It builds a multi-k canonical k-mer index, stores coordinate-aware positional postings, orders query seeds by estimated information per byte accessed, accumulates candidate sequences, and emits per-query instrumentation.
