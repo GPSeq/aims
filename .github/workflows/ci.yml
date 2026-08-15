@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Debug
+            build_dir: build-debug
+            cmake_args: -DCMAKE_BUILD_TYPE=Debug
+          - name: Release
+            build_dir: build-release
+            cmake_args: -DCMAKE_BUILD_TYPE=Release -DAIMS_ENABLE_ASAN=OFF
+          - name: Release OpenMP
+            build_dir: build-omp
+            cmake_args: -DCMAKE_BUILD_TYPE=Release -DAIMS_ENABLE_ASAN=OFF -DAIMS_ENABLE_OPENMP=ON
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B ${{ matrix.build_dir }} ${{ matrix.cmake_args }}
+
+      - name: Build
+        run: cmake --build ${{ matrix.build_dir }} --parallel
+
+      - name: Test
+        run: ctest --test-dir ${{ matrix.build_dir }} --output-on-failure
