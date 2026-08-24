@@ -2,7 +2,6 @@
 
 #include <optional>
 #include <span>
-#include <unordered_map>
 #include <vector>
 
 #include "aims/types.hpp"
@@ -38,7 +37,9 @@ public:
 private:
   std::vector<SeedKey> keys_{};
   std::vector<SeedMetadata> metadata_{};
-  std::unordered_map<SeedKey, SeedId> id_index_{};
+  // Open-addressing slots contain indexes into keys_; max SeedId marks an empty slot.
+  std::vector<SeedId> id_slots_{};
+  std::size_t id_slot_mask_{0};
 };
 
 } // namespace aims::index

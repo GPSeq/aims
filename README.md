@@ -28,6 +28,15 @@ ctest --test-dir build --output-on-failure
 Core checks remain active in every build type, including Release. Debug additionally enables
 AddressSanitizer and UndefinedBehaviorSanitizer when supported.
 
+ThreadSanitizer is available as a separate configuration because it cannot be combined with the
+address/undefined sanitizer build:
+
+```sh
+cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DAIMS_ENABLE_ASAN=OFF -DAIMS_ENABLE_TSAN=ON
+cmake --build build-tsan --parallel
+ctest --test-dir build-tsan --output-on-failure
+```
+
 Release build:
 
 ```sh
@@ -86,7 +95,9 @@ build-release/aims_query --index index.aims --query queries.fa --topk 10 --emit 
 | `--out path` | no | Write query metrics to a file instead of stdout. |
 | `--mmap` | no | Memory-map the index so compressed posting blocks stay file-backed. |
 | `--posting-cache-blocks N` | no | Cache recently decoded posting blocks; trades memory for repeated-query speed. |
+| `--posting-cache-bytes N` | no | Bound the decoded posting cache by bytes; combines with the block limit. |
 | `--threads N` | no | Number of async query workers, default `1`. |
+| `--query-chunk-size N` | no | Query records retained and processed at once, default `1024`. |
 | `--max-seeds N` | no | Query seed budget; `0` means unlimited. |
 | `--max-postings N` | no | Posting decode budget; `0` means unlimited. |
 | `--max-candidates N` | no | Candidate accumulator budget; `0` means unlimited. |
@@ -121,6 +132,8 @@ build-omp/aims_bench --ref refs.fa --query queries.fa --truth truth.tsv --k 15,1
 | `--dataset name` | no | Dataset label in the benchmark JSON, default `synthetic_kmer_fixture`. |
 | `--mmap` | no | Reload the temporary serialized index through the mmap reader. |
 | `--posting-cache-blocks N` | no | Cache decoded posting blocks after loading. |
+| `--posting-cache-bytes N` | no | Bound decoded posting cache memory in bytes. |
+| `--cache-mode disabled\|cold\|warm` | no | Cache methodology; warm performs an unmeasured preload pass. |
 | `--threads N` | no | OpenMP worker count for the internal index build, default `1`; requires OpenMP for `N > 1`. |
 | `--repeats N` | no | Repeat the query workload, default `1`. |
 | `--query-metrics-out path` | no | Write per-query metrics JSONL. |

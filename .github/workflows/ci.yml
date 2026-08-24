@@ -21,6 +21,9 @@ jobs:
           - name: Release OpenMP
             build_dir: build-omp
             cmake_args: -DCMAKE_BUILD_TYPE=Release -DAIMS_ENABLE_ASAN=OFF -DAIMS_ENABLE_OPENMP=ON
+          - name: Debug ThreadSanitizer
+            build_dir: build-tsan
+            cmake_args: -DCMAKE_BUILD_TYPE=Debug -DAIMS_ENABLE_ASAN=OFF -DAIMS_ENABLE_TSAN=ON
 
     steps:
       - name: Check out repository

@@ -52,4 +52,6 @@ The standard reader copies compressed posting blocks into owned memory. The mmap
 
 Serialization uses a backing-store-neutral compressed-block view. An index loaded with either the
 copy reader or mmap reader can therefore be serialized again without decoding and recompressing
-its postings.
+its postings. The writer streams sections to a same-directory temporary file, backpatches the
+header, computes the checksum over the finished header and payload, appends the footer, and then
+atomically renames the completed file. It never constructs a second full index image in memory.

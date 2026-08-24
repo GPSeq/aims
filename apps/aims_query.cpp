@@ -6,6 +6,7 @@
 #include <future>
 #include <iostream>
 #include <limits>
+#include <span>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -73,8 +74,8 @@ bool has_flag(int argc, char** argv, const std::string& name) {
 
 void print_help(std::ostream& out) {
   out << "Usage: aims_query --index index.aims --query queries.fa [--topk 10] [--emit jsonl|tsv] [--out results.jsonl]\n"
-      << "       [--mmap] [--posting-cache-blocks N]\n"
-      << "       [--threads N]\n"
+      << "       [--mmap] [--posting-cache-blocks N] [--posting-cache-bytes N]\n"
+      << "       [--threads N] [--query-chunk-size N]\n"
       << "       [--max-seeds N] [--max-postings N] [--max-candidates N]\n"
       << "       [--hot-seed-threshold N] [--hot-seed-class hot|very-hot] [--hot-mode skip|doc-only]\n"
       << "Stage: exact_retrieval. Output includes query metrics, per-k metrics, and structured top-k candidates.\n";
@@ -109,19 +110,27 @@ int main(int argc, char** argv) {
     const auto use_mmap = has_flag(argc, argv, "--mmap");
     const auto posting_cache_blocks =
         std::stoull(arg_or(argc, argv, "--posting-cache-blocks", "0"));
+    const auto posting_cache_bytes =
+        std::stoull(arg_or(argc, argv, "--posting-cache-bytes", "0"));
     const auto threads = std::max<std::uint64_t>(1, std::stoull(arg_or(argc, argv, "--threads", "1")));
+    const auto query_chunk_size_value =
+        std::stoull(arg_or(argc, argv, "--query-chunk-size", "1024"));
+    if (query_chunk_size_value == 0 ||
+        query_chunk_size_value > std::numeric_limits<std::size_t>::max()) {
+      throw std::runtime_error("--query-chunk-size must fit size_t and be greater than zero");
+    }
+    const auto query_chunk_size = static_cast<std::size_t>(query_chunk_size_value);
 
     const auto index = use_mmap
                            ? aims::serialization::read_kmer_exact_index_mmap(index_path,
                                                                              posting_cache_blocks)
                            : aims::serialization::read_kmer_exact_index(index_path);
-    if (!use_mmap && posting_cache_blocks != 0) {
+    if (posting_cache_blocks != 0 || posting_cache_bytes != 0) {
       for (const auto& layer : index.layers) {
         layer.postings.set_cache_limit(posting_cache_blocks);
+        layer.postings.set_cache_byte_limit(posting_cache_bytes);
       }
     }
-    const auto queries = aims::io::read_sequences(query_path);
-
     std::ofstream out_file;
     std::ostream* out = &std::cout;
     if (!out_path.empty()) {
@@ -149,56 +158,59 @@ int main(int argc, char** argv) {
               .hot_seed_mode = hot_seed_mode,
     };
 
-    std::vector<aims::instrumentation::QueryMetrics> results(queries.size());
-    if (threads == 1 || queries.size() <= 1) {
-      for (std::size_t i = 0; i < queries.size(); ++i) {
-        results[i] = aims::query::search_kmer_exact(index, queries[i], options);
-      }
-    } else {
-      std::vector<std::future<void>> futures;
-      const auto worker_count =
-          std::min<std::uint64_t>(threads, static_cast<std::uint64_t>(queries.size()));
-      futures.reserve(static_cast<std::size_t>(worker_count));
-      std::atomic<std::size_t> next_query{0};
-      for (std::uint64_t worker = 0; worker < worker_count; ++worker) {
-        futures.push_back(std::async(std::launch::async, [&] {
-          while (true) {
-            const auto query_index = next_query.fetch_add(1, std::memory_order_relaxed);
-            if (query_index >= queries.size()) {
-              return;
-            }
-            results[query_index] =
-                aims::query::search_kmer_exact(index, queries[query_index], options);
-          }
-        }));
-      }
-      for (auto& future : futures) {
-        future.get();
-      }
-    }
-
-    for (const auto& metrics : results) {
-
-      if (emit == "tsv") {
-        aims::instrumentation::write_query_metrics_tsv(*out, metrics);
+    const auto process_chunk = [&](std::span<const aims::io::FastaRecord> queries) {
+      std::vector<aims::instrumentation::QueryMetrics> results(queries.size());
+      if (threads == 1 || queries.size() <= 1) {
+        for (std::size_t i = 0; i < queries.size(); ++i) {
+          results[i] = aims::query::search_kmer_exact(index, queries[i], options);
+        }
       } else {
-        aims::instrumentation::write_query_metrics_jsonl(*out, metrics);
+        std::vector<std::future<void>> futures;
+        const auto worker_count =
+            std::min<std::uint64_t>(threads, static_cast<std::uint64_t>(queries.size()));
+        futures.reserve(static_cast<std::size_t>(worker_count));
+        std::atomic<std::size_t> next_query{0};
+        for (std::uint64_t worker = 0; worker < worker_count; ++worker) {
+          futures.push_back(std::async(std::launch::async, [&] {
+            while (true) {
+              const auto query_index = next_query.fetch_add(1, std::memory_order_relaxed);
+              if (query_index >= queries.size()) {
+                return;
+              }
+              results[query_index] =
+                  aims::query::search_kmer_exact(index, queries[query_index], options);
+            }
+          }));
+        }
+        for (auto& future : futures) {
+          future.get();
+        }
       }
 
-      std::cerr << "query=" << metrics.query_id
-                << " comparison_stage=exact_retrieval"
-                << " index=KmerExactIndex"
-                << " topk";
-      for (const auto& result : metrics.topk_results) {
-        std::cerr << " doc=" << result.document_id
-                  << ":seq=" << result.sequence_id
-                  << ":name=" << result.sequence_name
-                  << ":strand=" << (result.strand == aims::Strand::Forward ? "forward" : "reverse")
-                  << ":support=" << result.supporting_seeds
-                  << ":score=" << result.score;
+      for (const auto& metrics : results) {
+        if (emit == "tsv") {
+          aims::instrumentation::write_query_metrics_tsv(*out, metrics);
+        } else {
+          aims::instrumentation::write_query_metrics_jsonl(*out, metrics);
+        }
+
+        std::cerr << "query=" << metrics.query_id
+                  << " comparison_stage=exact_retrieval"
+                  << " index=KmerExactIndex"
+                  << " topk";
+        for (const auto& result : metrics.topk_results) {
+          std::cerr << " doc=" << result.document_id
+                    << ":seq=" << result.sequence_id
+                    << ":name=" << result.sequence_name
+                    << ":strand="
+                    << (result.strand == aims::Strand::Forward ? "forward" : "reverse")
+                    << ":support=" << result.supporting_seeds
+                    << ":score=" << result.score;
+        }
+        std::cerr << '\n';
       }
-      std::cerr << '\n';
-    }
+    };
+    aims::io::read_sequence_chunks(query_path, query_chunk_size, process_chunk);
     return 0;
   } catch (const std::exception& ex) {
     std::cerr << "aims_query: " << ex.what() << '\n';

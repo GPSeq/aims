@@ -2,6 +2,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <iostream>
 #include <map>
 #include <random>
@@ -432,6 +433,77 @@ void test_posting_budget_is_cache_state_independent() {
   }
 }
 
+void test_byte_bounded_cache_and_single_flight_decode() {
+  const std::vector<aims::io::FastaRecord> records = {
+      {.name = "r0", .sequence = "AAAAAAAAAACCCCCCCCCC", .document_id = 0, .sequence_id = 0},
+  };
+  const auto index = aims::build::build_fixed_k_exact(records, 3);
+  const auto key = aims::SeedKey{
+      .value = aims::seeds::canonical_kmer("AAA").value,
+      .family = aims::SeedFamily::Kmer,
+      .k = 3,
+  };
+  const auto seed_id = index.dictionary.id(key);
+  CHECK(seed_id.has_value());
+  const auto posting_count = index.postings.posting_count(*seed_id);
+
+  index.postings.set_cache_limit(0);
+  index.postings.set_cache_byte_limit(1);
+  index.postings.clear_cache();
+  const auto too_small_first = index.postings.visit_postings(*seed_id, [](const auto&) {});
+  const auto too_small_second = index.postings.visit_postings(*seed_id, [](const auto&) {});
+  CHECK(too_small_first.postings_decoded == posting_count);
+  CHECK(too_small_second.postings_decoded == posting_count);
+
+  index.postings.set_cache_byte_limit(1U << 20U);
+  index.postings.clear_cache();
+  std::vector<std::future<aims::index::PostingStore::ReadStats>> futures;
+  for (std::size_t worker = 0; worker < 8; ++worker) {
+    futures.push_back(std::async(std::launch::async, [&] {
+      return index.postings.visit_postings(*seed_id, [](const auto&) {});
+    }));
+  }
+  std::uint64_t total_decoded = 0;
+  for (auto& future : futures) {
+    total_decoded += future.get().postings_decoded;
+  }
+  CHECK(total_decoded == posting_count);
+
+  index.postings.set_cache_byte_limit(0);
+  const auto disabled_first = index.postings.visit_postings(*seed_id, [](const auto&) {});
+  const auto disabled_second = index.postings.visit_postings(*seed_id, [](const auto&) {});
+  CHECK(disabled_first.postings_decoded == posting_count);
+  CHECK(disabled_second.postings_decoded == posting_count);
+}
+
+void test_positional_diagonal_scoring_prefers_consistent_evidence() {
+  aims::instrumentation::QueryMetrics metrics;
+  aims::query::CandidateAccumulator accumulator;
+  for (aims::Position query_position = 0; query_position < 3; ++query_position) {
+    accumulator.add_positional_posting(aims::index::Posting{
+                                           .document_id = 0,
+                                           .sequence_id = 0,
+                                           .position = 10 + query_position * 20,
+                                           .strand = aims::Strand::Forward,
+                                       },
+                                       query_position, 5, 1.0, metrics);
+    accumulator.add_positional_posting(aims::index::Posting{
+                                           .document_id = 1,
+                                           .sequence_id = 1,
+                                           .position = 100 + query_position,
+                                           .strand = aims::Strand::Forward,
+                                       },
+                                       query_position, 5, 1.0, metrics);
+  }
+  const auto top = accumulator.top_k(2);
+  CHECK(top.size() == 2);
+  CHECK(top[0].document_id == 1);
+  CHECK(top[0].supporting_seeds == 3);
+  CHECK(top[0].score == 3.0);
+  CHECK(top[1].document_id == 0);
+  CHECK(top[1].supporting_seeds == 1);
+}
+
 void test_randomized_lookup_against_naive_map() {
   std::mt19937 rng(7);
   constexpr char bases[] = {'A', 'C', 'G', 'T'};
@@ -655,6 +727,8 @@ int main() {
   test_mmap_index_can_be_reserialized();
   test_search_reports_query_relative_strand();
   test_posting_budget_is_cache_state_independent();
+  test_byte_bounded_cache_and_single_flight_decode();
+  test_positional_diagonal_scoring_prefers_consistent_evidence();
   test_randomized_lookup_against_naive_map();
   test_corrupt_index_checksum_is_rejected();
   test_delta_varint_codec_round_trip();

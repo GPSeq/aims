@@ -44,7 +44,7 @@
       },
       "additionalProperties": false
     },
-    "cache_mode": { "type": "string", "enum": ["cold", "warm"] },
+    "cache_mode": { "type": "string", "enum": ["disabled", "cold", "warm"] },
     "loading_mode": { "type": "string", "enum": ["copy", "mmap"] },
     "repeats": { "type": "integer", "minimum": 1 },
     "index": {

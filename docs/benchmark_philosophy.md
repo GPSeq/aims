@@ -33,7 +33,11 @@ aims_bench --ref refs.fa --query queries.fa --truth truth.tsv --k 15,19,23,27,31
 
 Budgeted benchmark runs should include the exact options in the saved command. Relevant controls are `--max-seeds`, `--max-postings`, `--max-candidates`, and `--hot-seed-threshold`. The output reports skipped hot seeds and budgeted skips separately.
 
-Loading mode is part of the benchmark configuration. Runs using `--mmap` or `--posting-cache-blocks` should not be mixed with copied-load runs unless the command line is reported.
+Loading mode is part of the benchmark configuration. Runs using `--mmap`,
+`--posting-cache-blocks`, or `--posting-cache-bytes` should not be mixed with copied-load runs
+unless the command line is reported. `--cache-mode disabled` performs no decoded-block caching,
+`cold` clears the LRU before each measured query, and `warm` performs one unmeasured workload pass
+before timing.
 
 The truth TSV format used by the bundled fixture is:
 

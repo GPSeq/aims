@@ -1,11 +1,13 @@
 #pragma once
 
+#include <condition_variable>
 #include <memory>
 #include <span>
 #include <functional>
 #include <list>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "aims/types.hpp"
@@ -72,6 +74,8 @@ public:
                           std::vector<std::uint64_t> encoded_sizes,
                           std::vector<std::uint64_t> posting_counts);
   void set_cache_limit(std::uint64_t max_decoded_blocks) const;
+  void set_cache_byte_limit(std::uint64_t max_decoded_bytes) const;
+  void clear_cache() const;
   [[nodiscard]] PostingView fetch(SeedId id) const;
   [[nodiscard]] PostingView fetch_doc_only(SeedId id) const;
 
@@ -106,20 +110,34 @@ private:
   struct CacheEntry {
     SeedId id{0};
     std::shared_ptr<const std::vector<Posting>> postings;
+    std::uint64_t decoded_bytes{0};
   };
 
   [[nodiscard]] std::span<const std::uint8_t> block_bytes(std::size_t index) const noexcept;
   [[nodiscard]] std::shared_ptr<const std::vector<Posting>> decode_block(std::size_t index) const;
-  void cache_put(SeedId id, std::shared_ptr<const std::vector<Posting>> postings) const;
-  [[nodiscard]] std::shared_ptr<const std::vector<Posting>> cache_get(SeedId id) const;
+  void cache_put_locked(SeedId id,
+                        std::shared_ptr<const std::vector<Posting>> postings) const;
+  [[nodiscard]] std::shared_ptr<const std::vector<Posting>> cache_get_or_decode(
+      SeedId id,
+      bool& decoded_here,
+      bool pin_reader = false) const;
+  void release_cache_reader(SeedId id) const;
+  [[nodiscard]] bool cache_enabled() const;
+  void trim_cache_locked() const;
 
   std::vector<std::vector<std::uint8_t>> encoded_blocks_{};
   std::vector<std::uint64_t> posting_counts_{};
   std::vector<EncodedBlockRef> block_refs_{};
   mutable std::uint64_t max_cached_blocks_{0};
+  mutable std::uint64_t max_cached_bytes_{0};
+  mutable std::uint64_t cached_bytes_{0};
   mutable std::shared_ptr<std::mutex> cache_mutex_{std::make_shared<std::mutex>()};
+  mutable std::shared_ptr<std::condition_variable> cache_cv_{
+      std::make_shared<std::condition_variable>()};
   mutable std::list<CacheEntry> cache_lru_{};
   mutable std::unordered_map<SeedId, std::list<CacheEntry>::iterator> cache_index_{};
+  mutable std::unordered_set<SeedId> decoding_ids_{};
+  mutable std::unordered_map<SeedId, std::uint64_t> active_cache_readers_{};
 };
 
 } // namespace aims::index

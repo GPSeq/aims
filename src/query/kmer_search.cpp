@@ -16,6 +16,12 @@
 namespace aims::query {
 namespace {
 
+struct QueryEvidence {
+  Position position{0};
+  Strand strand{Strand::Forward};
+  double information{0.0};
+};
+
 // A SeedTask is the unit of work after query seeds have been planned and deduplicated.
 struct SeedTask {
   // The k-mer layer that owns the seed dictionary and posting store for this seed.
@@ -37,6 +43,8 @@ struct SeedTask {
   // Query occurrence counts are retained per strand so candidate orientation is relative.
   std::uint32_t forward_occurrence_count{0};
   std::uint32_t reverse_occurrence_count{0};
+  // Individual positions are retained so normal seeds can vote on consistent coordinate diagonals.
+  std::vector<QueryEvidence> evidence;
 };
 
 // Deduplication key: the same seed ID in different k layers is not the same lookup.
@@ -135,18 +143,13 @@ Strand relative_strand(Strand query_strand, Strand reference_strand) noexcept {
 void add_relative_posting(CandidateAccumulator& accumulator,
                           const index::Posting& posting,
                           const SeedTask& task,
+                          std::uint16_t k,
                           instrumentation::QueryMetrics& metrics) {
-  if (task.forward_occurrence_count != 0) {
+  for (const auto& evidence : task.evidence) {
     auto relative = posting;
-    relative.strand = relative_strand(Strand::Forward, posting.strand);
-    accumulator.add_posting(relative, task.forward_information, metrics,
-                            task.forward_occurrence_count);
-  }
-  if (task.reverse_occurrence_count != 0) {
-    auto relative = posting;
-    relative.strand = relative_strand(Strand::Reverse, posting.strand);
-    accumulator.add_posting(relative, task.reverse_information, metrics,
-                            task.reverse_occurrence_count);
+    relative.strand = relative_strand(evidence.strand, posting.strand);
+    accumulator.add_positional_posting(relative, evidence.position, k, evidence.information,
+                                       metrics);
   }
 }
 
@@ -283,6 +286,11 @@ instrumentation::QueryMetrics search_kmer_exact(const build::KmerExactIndex& ind
                                          : 0.0,
               .forward_occurrence_count = seed.occurrence.strand == Strand::Forward ? 1U : 0U,
               .reverse_occurrence_count = seed.occurrence.strand == Strand::Reverse ? 1U : 0U,
+              .evidence = {QueryEvidence{
+                  .position = seed.occurrence.position,
+                  .strand = seed.occurrence.strand,
+                  .information = seed.information,
+              }},
           });
         } else {
           // Repeated query seeds reuse one posting lookup but add evidence weight.
@@ -298,6 +306,11 @@ instrumentation::QueryMetrics search_kmer_exact(const build::KmerExactIndex& ind
             task.reverse_information += seed.information;
             ++task.reverse_occurrence_count;
           }
+          task.evidence.push_back(QueryEvidence{
+              .position = seed.occurrence.position,
+              .strand = seed.occurrence.strand,
+              .information = seed.information,
+          });
           // Recompute priority after changing the information value.
           task.priority = task.information / task.estimated_cost;
         }
@@ -439,7 +452,7 @@ instrumentation::QueryMetrics search_kmer_exact(const build::KmerExactIndex& ind
         task.seed_id,
         [&](const index::Posting& posting) {
           // Add every exact coordinate occurrence for non-hot or unrestricted seeds.
-          add_relative_posting(accumulator, posting, task, metrics);
+          add_relative_posting(accumulator, posting, task, layer.k, metrics);
         });
     // Charge compressed bytes read for this posting block.
     metrics.exact_bytes_read += read_stats.encoded_bytes_read;

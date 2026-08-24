@@ -1,5 +1,9 @@
 #include "aims/serialization/index_format.hpp"
 
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <chrono>
 #include <fstream>
 #include <iterator>
 #include <limits>
@@ -31,10 +35,16 @@ std::uint64_t checksum_bytes(std::span<const std::uint8_t> bytes) noexcept {
 }
 
 template <typename UInt>
-void append_le(std::vector<std::uint8_t>& bytes, UInt value) {
+void write_le(std::ostream& out, UInt value) {
   static_assert(std::is_unsigned_v<UInt>);
+  std::array<std::uint8_t, sizeof(UInt)> bytes{};
   for (std::size_t i = 0; i < sizeof(UInt); ++i) {
-    bytes.push_back(static_cast<std::uint8_t>((value >> (i * 8U)) & 0xffU));
+    bytes[i] = static_cast<std::uint8_t>((value >> (i * 8U)) & 0xffU);
+  }
+  out.write(reinterpret_cast<const char*>(bytes.data()),
+            static_cast<std::streamsize>(bytes.size()));
+  if (!out) {
+    throw std::runtime_error("failed while writing AIMS index");
   }
 }
 
@@ -52,21 +62,35 @@ UInt read_le(std::span<const std::uint8_t> bytes, std::size_t& offset) {
   return value;
 }
 
-void append_header(std::vector<std::uint8_t>& bytes, const IndexHeader& header) {
-  append_le<std::uint32_t>(bytes, header.magic);
-  append_le<std::uint16_t>(bytes, header.version);
-  append_le<std::uint16_t>(bytes, header.endian_marker);
-  append_le<std::uint32_t>(bytes, header.manifest_crc32);
-  append_le<std::uint64_t>(bytes, header.metadata_offset);
-  append_le<std::uint64_t>(bytes, header.router_directory_offset);
-  append_le<std::uint64_t>(bytes, header.dictionary_directory_offset);
-  append_le<std::uint64_t>(bytes, header.posting_directory_offset);
-  append_le<std::uint64_t>(bytes, header.checksum_footer_offset);
+void write_header(std::ostream& out, const IndexHeader& header) {
+  write_le<std::uint32_t>(out, header.magic);
+  write_le<std::uint16_t>(out, header.version);
+  write_le<std::uint16_t>(out, header.endian_marker);
+  write_le<std::uint32_t>(out, header.manifest_crc32);
+  write_le<std::uint64_t>(out, header.metadata_offset);
+  write_le<std::uint64_t>(out, header.router_directory_offset);
+  write_le<std::uint64_t>(out, header.dictionary_directory_offset);
+  write_le<std::uint64_t>(out, header.posting_directory_offset);
+  write_le<std::uint64_t>(out, header.checksum_footer_offset);
 }
 
-void append_string(std::vector<std::uint8_t>& bytes, const std::string& value) {
-  append_le<std::uint64_t>(bytes, value.size());
-  bytes.insert(bytes.end(), value.begin(), value.end());
+void write_bytes(std::ostream& out, std::span<const std::uint8_t> bytes) {
+  constexpr std::size_t max_chunk = 1U << 30U;
+  while (!bytes.empty()) {
+    const auto chunk_size = std::min(bytes.size(), max_chunk);
+    out.write(reinterpret_cast<const char*>(bytes.data()),
+              static_cast<std::streamsize>(chunk_size));
+    if (!out) {
+      throw std::runtime_error("failed while writing AIMS index payload");
+    }
+    bytes = bytes.subspan(chunk_size);
+  }
+}
+
+void write_string(std::ostream& out, const std::string& value) {
+  write_le<std::uint64_t>(out, value.size());
+  write_bytes(out, std::span<const std::uint8_t>(
+                       reinterpret_cast<const std::uint8_t*>(value.data()), value.size()));
 }
 
 IndexHeader read_header(std::span<const std::uint8_t> bytes, std::size_t& offset) {
@@ -289,6 +313,177 @@ build::KmerExactIndex parse_kmer_exact_index(std::span<const std::uint8_t> bytes
   return index;
 }
 
+std::uint64_t output_offset(std::ostream& out) {
+  const auto position = out.tellp();
+  if (position < 0) {
+    throw std::runtime_error("failed to determine AIMS index output offset");
+  }
+  return static_cast<std::uint64_t>(position);
+}
+
+std::filesystem::path temporary_index_path(const std::filesystem::path& destination) {
+  static std::atomic<std::uint64_t> counter{0};
+  const auto stamp = static_cast<std::uint64_t>(
+      std::chrono::steady_clock::now().time_since_epoch().count());
+  const auto parent = destination.has_parent_path() ? destination.parent_path()
+                                                     : std::filesystem::path{"."};
+  const auto base = destination.filename().string();
+  for (std::uint64_t attempt = 0; attempt < 100; ++attempt) {
+    const auto suffix = stamp + counter.fetch_add(1, std::memory_order_relaxed) + attempt;
+    auto candidate = parent / (base + ".tmp." + std::to_string(suffix));
+    if (!std::filesystem::exists(candidate)) {
+      return candidate;
+    }
+  }
+  throw std::runtime_error("failed to allocate a temporary AIMS index path");
+}
+
+class TemporaryIndexGuard {
+public:
+  explicit TemporaryIndexGuard(std::filesystem::path path) : path_(std::move(path)) {}
+  ~TemporaryIndexGuard() {
+    if (!committed_) {
+      std::error_code ignored;
+      std::filesystem::remove(path_, ignored);
+    }
+  }
+
+  TemporaryIndexGuard(const TemporaryIndexGuard&) = delete;
+  TemporaryIndexGuard& operator=(const TemporaryIndexGuard&) = delete;
+
+  [[nodiscard]] const std::filesystem::path& path() const noexcept { return path_; }
+  void commit() noexcept { committed_ = true; }
+
+private:
+  std::filesystem::path path_;
+  bool committed_{false};
+};
+
+std::uint64_t checksum_file(const std::filesystem::path& path) {
+  std::ifstream in(path, std::ios::binary);
+  if (!in) {
+    throw std::runtime_error("failed to reopen temporary AIMS index for checksum");
+  }
+  std::uint64_t checksum = checksum_seed;
+  std::array<char, 1U << 20U> buffer{};
+  while (in) {
+    in.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+    const auto count = in.gcount();
+    for (std::streamsize i = 0; i < count; ++i) {
+      checksum_append(checksum, static_cast<std::uint8_t>(buffer[static_cast<std::size_t>(i)]));
+    }
+  }
+  if (!in.eof()) {
+    throw std::runtime_error("failed while checksumming temporary AIMS index");
+  }
+  return checksum;
+}
+
+void write_index_streaming(const std::filesystem::path& path,
+                           std::uint64_t document_count,
+                           const std::string& source_uri,
+                           const std::string& source_checksum,
+                           const std::string& build_command,
+                           std::span<const build::SequenceMetadata> sequences,
+                           std::span<const build::FixedKIndex> layers) {
+  if (!is_little_endian()) {
+    throw std::runtime_error("AIMS index writer currently requires little-endian host order");
+  }
+  if (layers.empty()) {
+    throw std::runtime_error("KmerExactIndex requires at least one k-mer layer");
+  }
+  for (const auto& layer : layers) {
+    if (layer.dictionary.size() != layer.postings.size()) {
+      throw std::runtime_error("dictionary and posting store size mismatch");
+    }
+  }
+
+  TemporaryIndexGuard temporary(temporary_index_path(path));
+  std::ofstream out(temporary.path(), std::ios::binary | std::ios::trunc);
+  if (!out) {
+    throw std::runtime_error("failed to open temporary AIMS index: " +
+                             temporary.path().string());
+  }
+
+  constexpr std::uint64_t header_size = 52;
+  std::array<std::uint8_t, header_size> placeholder{};
+  write_bytes(out, placeholder);
+
+  IndexHeader header;
+  header.metadata_offset = header_size;
+  header.router_directory_offset = 0;
+  write_le<std::uint64_t>(out, document_count);
+  write_le<std::uint64_t>(out, layers.size());
+  write_string(out, source_uri);
+  write_string(out, source_checksum);
+  write_string(out, build_command);
+  write_le<std::uint64_t>(out, sequences.size());
+  for (const auto& sequence : sequences) {
+    write_le<std::uint32_t>(out, sequence.document_id);
+    write_le<std::uint64_t>(out, sequence.sequence_id);
+    write_le<std::uint64_t>(out, sequence.length);
+    write_string(out, sequence.name);
+  }
+
+  header.dictionary_directory_offset = output_offset(out);
+  bool posting_offset_set = false;
+  for (const auto& layer : layers) {
+    write_le<std::uint16_t>(out, layer.k);
+    write_le<std::uint16_t>(out, 0);
+    write_le<std::uint64_t>(out, layer.document_count);
+    write_le<std::uint64_t>(out, layer.dictionary.size());
+    const auto keys = layer.dictionary.keys();
+    for (std::size_t i = 0; i < keys.size(); ++i) {
+      const auto& key = keys[i];
+      const auto& metadata = layer.dictionary.metadata(static_cast<SeedId>(i));
+      write_le<std::uint64_t>(out, key.value);
+      write_le<std::uint8_t>(out, static_cast<std::uint8_t>(key.family));
+      write_le<std::uint16_t>(out, key.k);
+      write_le<std::uint64_t>(out, metadata.document_frequency);
+      write_le<std::uint64_t>(out, metadata.collection_frequency);
+      write_le<std::uint64_t>(out, metadata.estimated_posting_bytes);
+      write_le<std::uint8_t>(out, static_cast<std::uint8_t>(metadata.frequency_class));
+    }
+
+    if (!posting_offset_set) {
+      header.posting_directory_offset = output_offset(out);
+      posting_offset_set = true;
+    }
+    write_le<std::uint64_t>(out, layer.postings.size());
+    for (SeedId i = 0; i < layer.postings.size(); ++i) {
+      const auto block = layer.postings.encoded_block(i);
+      write_le<std::uint64_t>(out, layer.postings.posting_count(i));
+      write_le<std::uint64_t>(out, block.size());
+      write_bytes(out, block);
+    }
+  }
+
+  header.checksum_footer_offset = output_offset(out);
+  out.seekp(0);
+  write_header(out, header);
+  out.flush();
+  if (!out) {
+    throw std::runtime_error("failed to finalize temporary AIMS index");
+  }
+  out.close();
+
+  const auto checksum = checksum_file(temporary.path());
+  std::ofstream footer(temporary.path(), std::ios::binary | std::ios::app);
+  if (!footer) {
+    throw std::runtime_error("failed to append AIMS index checksum");
+  }
+  write_le<std::uint64_t>(footer, checksum);
+  footer.close();
+
+  std::error_code rename_error;
+  std::filesystem::rename(temporary.path(), path, rename_error);
+  if (rename_error) {
+    throw std::runtime_error("failed to install AIMS index atomically: " +
+                             rename_error.message());
+  }
+  temporary.commit();
+}
+
 } // namespace
 
 bool is_little_endian() noexcept {
@@ -319,10 +514,8 @@ void validate_header_or_throw(const IndexHeader& header) {
 
 void write_fixed_k_exact_index(const std::filesystem::path& path,
                                const build::FixedKIndex& index) {
-  build::KmerExactIndex multi_index;
-  multi_index.document_count = index.document_count;
-  multi_index.layers.push_back(index);
-  write_kmer_exact_index(path, multi_index);
+  write_index_streaming(path, index.document_count, {}, {}, {}, {},
+                        std::span<const build::FixedKIndex>(&index, 1));
 }
 
 build::FixedKIndex read_fixed_k_exact_index(const std::filesystem::path& path) {
@@ -335,84 +528,8 @@ build::FixedKIndex read_fixed_k_exact_index(const std::filesystem::path& path) {
 
 void write_kmer_exact_index(const std::filesystem::path& path,
                             const build::KmerExactIndex& index) {
-  if (!is_little_endian()) {
-    throw std::runtime_error("AIMS index writer currently requires little-endian host order");
-  }
-  if (index.layers.empty()) {
-    throw std::runtime_error("KmerExactIndex requires at least one k-mer layer");
-  }
-  for (const auto& layer : index.layers) {
-    if (layer.dictionary.size() != layer.postings.size()) {
-      throw std::runtime_error("dictionary and posting store size mismatch");
-    }
-  }
-
-  IndexHeader header;
-  header.metadata_offset = 52;
-  header.router_directory_offset = 0;
-
-  std::vector<std::uint8_t> payload;
-  append_le<std::uint64_t>(payload, index.document_count);
-  append_le<std::uint64_t>(payload, index.layers.size());
-  append_string(payload, index.source_uri);
-  append_string(payload, index.source_checksum);
-  append_string(payload, index.build_command);
-  append_le<std::uint64_t>(payload, index.sequences.size());
-  for (const auto& sequence : index.sequences) {
-    append_le<std::uint32_t>(payload, sequence.document_id);
-    append_le<std::uint64_t>(payload, sequence.sequence_id);
-    append_le<std::uint64_t>(payload, sequence.length);
-    append_string(payload, sequence.name);
-  }
-
-  header.dictionary_directory_offset = header.metadata_offset + payload.size();
-
-  bool posting_offset_set = false;
-  for (const auto& layer : index.layers) {
-    append_le<std::uint16_t>(payload, layer.k);
-    append_le<std::uint16_t>(payload, 0);
-    append_le<std::uint64_t>(payload, layer.document_count);
-    append_le<std::uint64_t>(payload, layer.dictionary.size());
-
-    const auto keys = layer.dictionary.keys();
-    for (std::size_t i = 0; i < keys.size(); ++i) {
-      const auto& key = keys[i];
-      const auto& metadata = layer.dictionary.metadata(static_cast<SeedId>(i));
-      append_le<std::uint64_t>(payload, key.value);
-      append_le<std::uint8_t>(payload, static_cast<std::uint8_t>(key.family));
-      append_le<std::uint16_t>(payload, key.k);
-      append_le<std::uint64_t>(payload, metadata.document_frequency);
-      append_le<std::uint64_t>(payload, metadata.collection_frequency);
-      append_le<std::uint64_t>(payload, metadata.estimated_posting_bytes);
-      append_le<std::uint8_t>(payload, static_cast<std::uint8_t>(metadata.frequency_class));
-    }
-
-    if (!posting_offset_set) {
-      header.posting_directory_offset = header.metadata_offset + payload.size();
-      posting_offset_set = true;
-    }
-    append_le<std::uint64_t>(payload, layer.postings.size());
-    for (SeedId i = 0; i < layer.postings.size(); ++i) {
-      const auto encoded_block = layer.postings.encoded_block(i);
-      append_le<std::uint64_t>(payload, layer.postings.posting_count(i));
-      append_le<std::uint64_t>(payload, encoded_block.size());
-      payload.insert(payload.end(), encoded_block.begin(), encoded_block.end());
-    }
-  }
-
-  header.checksum_footer_offset = header.metadata_offset + payload.size();
-
-  std::vector<std::uint8_t> bytes;
-  append_header(bytes, header);
-  bytes.insert(bytes.end(), payload.begin(), payload.end());
-  append_le<std::uint64_t>(bytes, checksum_bytes(bytes));
-
-  std::ofstream out(path, std::ios::binary);
-  if (!out) {
-    throw std::runtime_error("failed to write AIMS index: " + path.string());
-  }
-  out.write(reinterpret_cast<const char*>(bytes.data()),
-            static_cast<std::streamsize>(bytes.size()));
+  write_index_streaming(path, index.document_count, index.source_uri, index.source_checksum,
+                        index.build_command, index.sequences, index.layers);
 }
 
 build::KmerExactIndex read_kmer_exact_index(const std::filesystem::path& path) {

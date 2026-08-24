@@ -27,6 +27,8 @@ Important options:
 --threads N
 --mmap
 --posting-cache-blocks N
+--posting-cache-bytes N
+--query-chunk-size N
 --max-seeds N
 --max-postings N
 --max-candidates N
@@ -41,6 +43,10 @@ Candidate strand is relative to the query, not an absolute reference annotation.
 when query and reference occurrences have equal canonical orientation and `reverse` when they
 differ. Posting budgets are based on logical posting-list sizes and yield the same retrieval plan
 for cold and warm caches; byte and decode metrics continue to reflect physical cache behavior.
+Query input is read in `--query-chunk-size` record batches, bounding input/result memory while
+preserving input-order output. Concurrent requests for one uncached posting block share one decode.
+Decoded blocks in active use are eviction-safe. A byte limit may be exceeded temporarily only
+while all possible eviction candidates are active, and a block larger than the limit is not cached.
 
 ## Benchmark
 
@@ -53,6 +59,8 @@ Useful benchmark options:
 ```text
 --mmap
 --posting-cache-blocks N
+--posting-cache-bytes N
+--cache-mode disabled|cold|warm
 --threads N
 --repeats N
 --query-metrics-out query_metrics.jsonl
@@ -65,6 +73,9 @@ Useful benchmark options:
 ```
 
 `aims_bench` emits one `BenchmarkResult` JSON object. When truth is provided, it reports top-1/top-5/top-10 recall. Load time, build time, query time, RSS, bytes read per query, and postings decoded per query are reported separately. `--threads` controls the internal index build and has the same OpenMP requirement as `aims_build`.
+
+`disabled` performs streaming posting decode without an LRU. `cold` clears the configured LRU
+before every measured query. `warm` performs one complete unmeasured query pass before timing.
 
 ## Inspect And Validate
 

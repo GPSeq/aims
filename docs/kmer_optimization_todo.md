@@ -65,3 +65,55 @@ Status: done.
 
 Goal: make posting-store copies rebind internal references, make mmap and owned compressed blocks
 equally serializable, and keep posting budgets deterministic across cache states.
+
+## Step 11: Compact dictionary lookup table
+
+Status: done.
+
+Goal: replace the node-based seed-ID hash map with a contiguous open-addressing table while
+retaining deterministic sorted dictionary keys.
+
+## Step 12: Lower-memory index finalization
+
+Status: done.
+
+Goal: release hash-map nodes and raw posting vectors progressively while sorted posting lists are
+encoded. This lowers finalization peak memory; disk-backed partitioning remains a later option for
+collections that cannot fit their raw postings in memory at all.
+
+## Step 13: Atomic streaming index writer
+
+Status: done.
+
+Goal: write index sections directly to a same-directory temporary file, backpatch the final header,
+calculate the checksum without constructing a second full index image in memory, and atomically
+rename the completed file.
+
+## Step 14: Bounded query pipeline
+
+Status: done.
+
+Goal: read and execute query records in configurable chunks while preserving deterministic input
+order and using a bounded worker set.
+
+## Step 15: Byte-bounded decoded posting cache
+
+Status: done.
+
+Goal: support cache limits in decoded bytes as well as block count and report cache methodology
+accurately in benchmarks.
+
+## Step 16: Position-consistent candidate evidence
+
+Status: done.
+
+Goal: retain query positions and group evidence by compatible forward/reverse coordinate diagonals
+so repetitive seed Cartesian products do not dominate candidate scores. Keep this as exact
+retrieval rather than claiming downstream alignment.
+
+## Step 17: Stress and concurrency verification
+
+Status: done.
+
+Goal: add malformed-input properties, large generated fixtures, threaded deterministic-output
+checks, and optional thread-sanitizer coverage where the toolchain supports it.

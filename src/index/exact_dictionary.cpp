@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <limits>
 #include <stdexcept>
 
 namespace aims::index {
@@ -37,10 +38,31 @@ void SortedArrayDictionary::build(std::vector<SeedKey> keys, std::vector<SeedMet
   if (std::adjacent_find(keys_.begin(), keys_.end()) != keys_.end()) {
     throw std::invalid_argument("dictionary keys must be unique");
   }
-  id_index_.clear();
-  id_index_.reserve(keys_.size());
+  id_slots_.clear();
+  id_slot_mask_ = 0;
+  if (keys_.empty()) {
+    return;
+  }
+  if (keys_.size() > std::numeric_limits<std::size_t>::max() / 2U) {
+    throw std::length_error("dictionary is too large for the lookup table");
+  }
+  const auto required_slots = keys_.size() * 2U;
+  std::size_t slot_count = 1;
+  while (slot_count < required_slots) {
+    if (slot_count > std::numeric_limits<std::size_t>::max() / 2U) {
+      throw std::length_error("dictionary lookup table size overflow");
+    }
+    slot_count *= 2U;
+  }
+  constexpr SeedId empty_slot = std::numeric_limits<SeedId>::max();
+  id_slots_.assign(slot_count, empty_slot);
+  id_slot_mask_ = slot_count - 1U;
   for (std::size_t i = 0; i < keys_.size(); ++i) {
-    id_index_.emplace(keys_[i], static_cast<SeedId>(i));
+    auto slot = std::hash<SeedKey>{}(keys_[i]) & id_slot_mask_;
+    while (id_slots_[slot] != empty_slot) {
+      slot = (slot + 1U) & id_slot_mask_;
+    }
+    id_slots_[slot] = static_cast<SeedId>(i);
   }
 }
 
@@ -49,9 +71,17 @@ bool SortedArrayDictionary::contains(const SeedKey& key) const {
 }
 
 std::optional<SeedId> SortedArrayDictionary::id(const SeedKey& key) const {
-  const auto found = id_index_.find(key);
-  if (found != id_index_.end()) {
-    return found->second;
+  if (id_slots_.empty()) {
+    return std::nullopt;
+  }
+  constexpr SeedId empty_slot = std::numeric_limits<SeedId>::max();
+  auto slot = std::hash<SeedKey>{}(key) & id_slot_mask_;
+  while (id_slots_[slot] != empty_slot) {
+    const auto id = id_slots_[slot];
+    if (keys_[static_cast<std::size_t>(id)] == key) {
+      return id;
+    }
+    slot = (slot + 1U) & id_slot_mask_;
   }
   return std::nullopt;
 }

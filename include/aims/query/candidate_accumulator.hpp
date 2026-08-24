@@ -43,6 +43,16 @@ public:
                    instrumentation::QueryMetrics& metrics,
                    std::uint32_t support_increment = 1);
 
+  /**
+   * Add coordinate-aware evidence. Only the strongest exact coordinate diagonal contributes to
+   * each candidate, preventing repetitive Cartesian seed matches from inflating its rank.
+   */
+  void add_positional_posting(const index::Posting& posting,
+                              Position query_position,
+                              std::uint16_t k,
+                              double seed_weight,
+                              instrumentation::QueryMetrics& metrics);
+
   void add_postings(index::PostingView postings,
                    double seed_weight,
                    instrumentation::QueryMetrics& metrics);
@@ -72,8 +82,33 @@ private:
     [[nodiscard]] std::size_t operator()(const CandidateKey& key) const noexcept;
   };
 
+  struct CandidateEntry {
+    CandidateScore score{};
+    std::uint32_t base_support{0};
+    double base_score{0.0};
+    std::uint32_t best_diagonal_support{0};
+    double best_diagonal_score{0.0};
+  };
+
+  struct DiagonalKey {
+    CandidateKey candidate{};
+    std::uint64_t diagonal{0};
+
+    friend bool operator==(const DiagonalKey&, const DiagonalKey&) = default;
+  };
+
+  struct DiagonalKeyHash {
+    [[nodiscard]] std::size_t operator()(const DiagonalKey& key) const noexcept;
+  };
+
+  struct DiagonalScore {
+    std::uint32_t supporting_seeds{0};
+    double score{0.0};
+  };
+
   CandidateAccumulatorOptions options_{};
-  std::unordered_map<CandidateKey, CandidateScore, CandidateKeyHash> candidates_{};
+  std::unordered_map<CandidateKey, CandidateEntry, CandidateKeyHash> candidates_{};
+  std::unordered_map<DiagonalKey, DiagonalScore, DiagonalKeyHash> diagonals_{};
 };
 
 } // namespace aims::query

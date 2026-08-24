@@ -6,6 +6,7 @@ project(AIMS
   LANGUAGES CXX)
 
 option(AIMS_ENABLE_ASAN "Enable AddressSanitizer and UndefinedBehaviorSanitizer in Debug builds" ON)
+option(AIMS_ENABLE_TSAN "Enable ThreadSanitizer in Debug builds" OFF)
 option(AIMS_ENABLE_LTO "Enable interprocedural optimization for Release builds when supported" OFF)
 option(AIMS_ENABLE_OPENMP "Enable OpenMP parallel index-building support" OFF)
 
@@ -60,7 +61,14 @@ endfunction()
 
 aims_enable_warnings(aims)
 
-if(AIMS_ENABLE_ASAN AND CMAKE_BUILD_TYPE STREQUAL "Debug" AND NOT MSVC)
+if(AIMS_ENABLE_ASAN AND AIMS_ENABLE_TSAN)
+  message(FATAL_ERROR "AIMS_ENABLE_ASAN and AIMS_ENABLE_TSAN cannot be enabled together")
+endif()
+
+if(AIMS_ENABLE_TSAN AND CMAKE_BUILD_TYPE STREQUAL "Debug" AND NOT MSVC)
+  target_compile_options(aims PRIVATE -fsanitize=thread -fno-omit-frame-pointer)
+  target_link_options(aims PUBLIC -fsanitize=thread)
+elseif(AIMS_ENABLE_ASAN AND CMAKE_BUILD_TYPE STREQUAL "Debug" AND NOT MSVC)
   target_compile_options(aims PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
   target_link_options(aims PUBLIC -fsanitize=address,undefined)
 endif()
@@ -121,15 +129,12 @@ if(BUILD_TESTING)
       -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_smoke.cmake)
 
   add_test(NAME aims_bench_smoke
-    COMMAND $<TARGET_FILE:aims_bench>
-      --ref ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/kmer_refs.fa
-      --query ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/kmer_queries.fa
-      --truth ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/kmer_truth.tsv
-      --k 5,7
-      --topk 3
-      --dataset synthetic_kmer_fixture)
-  set_tests_properties(aims_bench_smoke PROPERTIES
-    PASS_REGULAR_EXPRESSION "\"top1_recall\"")
+    COMMAND ${CMAKE_COMMAND}
+      -DAIMS_BENCH_EXE=$<TARGET_FILE:aims_bench>
+      -DAIMS_REF=${CMAKE_CURRENT_SOURCE_DIR}/tests/data/kmer_refs.fa
+      -DAIMS_QUERY=${CMAKE_CURRENT_SOURCE_DIR}/tests/data/kmer_queries.fa
+      -DAIMS_TRUTH=${CMAKE_CURRENT_SOURCE_DIR}/tests/data/kmer_truth.tsv
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/bench_smoke.cmake)
 
   add_test(NAME aims_generated_fixture_smoke
     COMMAND ${CMAKE_COMMAND}

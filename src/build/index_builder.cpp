@@ -121,19 +121,22 @@ FixedKIndex build_fixed_k_from_postings(PostingMap postings_by_key,
   encoded_blocks.reserve(postings_by_key.size());
   posting_counts.reserve(postings_by_key.size());
 
-  std::vector<std::pair<SeedKey, std::vector<index::Posting>*>> ordered_postings;
+  // Move posting vectors out of the node-based accumulator before encoding. This releases hash
+  // nodes early and lets each raw posting vector be freed as soon as its compressed block exists.
+  std::vector<std::pair<SeedKey, std::vector<index::Posting>>> ordered_postings;
   ordered_postings.reserve(postings_by_key.size());
   for (auto& [key, posting_list] : postings_by_key) {
-    ordered_postings.push_back({key, &posting_list});
+    ordered_postings.push_back({key, std::move(posting_list)});
   }
+  postings_by_key.clear();
+  postings_by_key.rehash(0);
   std::sort(ordered_postings.begin(), ordered_postings.end(),
             [](const auto& lhs, const auto& rhs) {
               return lhs.first < rhs.first;
             });
 
   // Convert the hash accumulator into deterministic dictionary and posting arrays.
-  for (auto& [key, posting_list_ptr] : ordered_postings) {
-    auto& posting_list = *posting_list_ptr;
+  for (auto& [key, posting_list] : ordered_postings) {
     // Sorting is required for deterministic output and delta compression.
     if (!std::is_sorted(posting_list.begin(), posting_list.end())) {
       std::sort(posting_list.begin(), posting_list.end());
@@ -153,6 +156,8 @@ FixedKIndex build_fixed_k_from_postings(PostingMap postings_by_key,
     });
     posting_counts.push_back(collection_frequency);
     encoded_blocks.push_back(std::move(encoded));
+    // Do not retain raw coordinates while later seed lists are being encoded.
+    std::vector<index::Posting>().swap(posting_list);
   }
 
   // Assemble the fixed-k index layer.

@@ -3,7 +3,7 @@ file(MAKE_DIRECTORY "${workdir}")
 
 file(WRITE "${workdir}/refs.fa" ">ref0\nAACCGGTTAACC\n>ref1\nTTTTAACCGGTT\n")
 file(WRITE "${workdir}/queries.fq"
-  "@q0\nAACCGGTT\n+\nFFFFFFFF\n@q1\nTTTTAACC\n+\nIIIIIIII\n")
+  "@q0\nAACCGGTT\n+\nFFFFFFFF\n@q1\nTTTTAACC\n+\nIIIIIIII\n@q2\nAACCGGTT\n+\nJJJJJJJJ\n@q3\nTTTTAACC\n+\nHHHHHHHH\n")
 
 execute_process(
   COMMAND "${AIMS_BUILD_EXE}" --ref "${workdir}/refs.fa" --out "${workdir}/idx.aims" --k 4,6
@@ -15,7 +15,7 @@ if(NOT build_result EQUAL 0)
 endif()
 
 execute_process(
-  COMMAND "${AIMS_QUERY_EXE}" --index "${workdir}/idx.aims" --query "${workdir}/queries.fq" --topk 2 --emit jsonl --out "${workdir}/query_results.jsonl" --mmap --posting-cache-blocks 2 --threads 2
+  COMMAND "${AIMS_QUERY_EXE}" --index "${workdir}/idx.aims" --query "${workdir}/queries.fq" --topk 2 --emit jsonl --out "${workdir}/query_results.jsonl" --mmap --posting-cache-blocks 2 --threads 2 --query-chunk-size 2
   RESULT_VARIABLE query_result
   OUTPUT_VARIABLE query_stdout
   ERROR_VARIABLE query_stderr)
@@ -42,7 +42,10 @@ endif()
 
 string(FIND "${query_output_file}" "\"query_id\":\"q0\"" q0_pos)
 string(FIND "${query_output_file}" "\"query_id\":\"q1\"" q1_pos)
-if(q0_pos EQUAL -1 OR q1_pos EQUAL -1 OR q1_pos LESS q0_pos)
+string(FIND "${query_output_file}" "\"query_id\":\"q2\"" q2_pos)
+string(FIND "${query_output_file}" "\"query_id\":\"q3\"" q3_pos)
+if(q0_pos EQUAL -1 OR q1_pos EQUAL -1 OR q2_pos EQUAL -1 OR q3_pos EQUAL -1 OR
+   q1_pos LESS q0_pos OR q2_pos LESS q1_pos OR q3_pos LESS q2_pos)
   message(FATAL_ERROR "threaded query output did not preserve input order: ${query_output_file}")
 endif()
 

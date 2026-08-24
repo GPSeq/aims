@@ -42,6 +42,11 @@ Results from different stages are not interchangeable.
 The planner resolves each generated canonical k-mer to a dictionary seed ID once and carries that
 ID into execution. Repeated occurrences of the same seed are deduplicated into one posting lookup,
 while their information weight and forward/reverse canonical-orientation counts are retained.
+Their individual query coordinates are also retained. Normal positional seeds vote into exact
+coordinate diagonals: `reference_position - query_position` for forward candidates and
+`reference_position + query_position + k` for reverse candidates. Only the strongest diagonal is
+used for ranking, preventing unrelated repetitive coordinates from receiving a Cartesian-product
+score. Doc-only evidence remains coordinate-free and is added separately.
 
 A posting stores the reference occurrence's orientation relative to the canonical k-mer. Candidate
 orientation is relative to the query and is computed as:
@@ -61,6 +66,13 @@ exposes the same zero-copy encoded-block view for both forms. Copies rebuild own
 retain shared ownership for mapped blocks, and start with an empty decoded cache. Query workers
 share an immutable index; only the bounded decoded-block LRU is synchronized.
 
-The query CLI starts at most `--threads` long-lived asynchronous workers and writes completed
-results in original input order. Posting budgets use logical posting counts, so cache warmness does
-not alter which seeds are admitted.
+The query CLI starts at most `--threads` asynchronous workers per bounded input chunk and writes
+completed results in original input order. Posting budgets use logical posting counts, so cache
+warmness does not alter which seeds are admitted. Concurrent misses for one posting block share
+one decode, and the decoded LRU can be bounded by block count, byte count, or both.
+Active visitors are pinned under the cache mutex, so eviction cannot reclaim their decoded
+vectors. Limits are temporarily soft only when every eviction candidate is active; trimming is
+retried when each visitor finishes. A block larger than the byte limit is served but not cached.
+
+The sorted dictionary's lookup accelerator is a contiguous open-addressing table. This avoids one
+heap allocation per seed while retaining sorted keys for deterministic serialization.

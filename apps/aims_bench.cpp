@@ -77,7 +77,8 @@ bool has_flag(int argc, char** argv, const std::string& name) {
 
 void print_help(std::ostream& out) {
   out << "Usage: aims_bench --ref refs.fa --query queries.fa --k 15,19 [--topk 10] [--truth truth.tsv]\n"
-      << "       [--mmap] [--posting-cache-blocks N]\n"
+      << "       [--mmap] [--posting-cache-blocks N] [--posting-cache-bytes N]\n"
+      << "       [--cache-mode disabled|cold|warm]\n"
       << "       [--threads N]\n"
       << "       [--repeats N] [--query-metrics-out metrics.jsonl]\n"
       << "       [--max-seeds N] [--max-postings N] [--max-candidates N]\n"
@@ -291,6 +292,17 @@ int main(int argc, char** argv) {
     const auto use_mmap = has_flag(argc, argv, "--mmap");
     const auto posting_cache_blocks =
         std::stoull(arg_or(argc, argv, "--posting-cache-blocks", "0"));
+    const auto posting_cache_bytes =
+        std::stoull(arg_or(argc, argv, "--posting-cache-bytes", "0"));
+    const bool cache_configured = posting_cache_blocks != 0 || posting_cache_bytes != 0;
+    const auto cache_mode =
+        arg_or(argc, argv, "--cache-mode", cache_configured ? "warm" : "disabled");
+    if (cache_mode != "disabled" && cache_mode != "cold" && cache_mode != "warm") {
+      throw std::runtime_error("invalid --cache-mode, expected disabled, cold, or warm");
+    }
+    if (cache_mode != "disabled" && !cache_configured) {
+      throw std::runtime_error("cold or warm cache mode requires a posting cache limit");
+    }
     const auto repeats = std::max<std::uint64_t>(1, std::stoull(arg_or(argc, argv, "--repeats", "1")));
     const auto threads = parse_thread_count(arg_or(argc, argv, "--threads", "1"));
     const auto query_metrics_out = arg_or(argc, argv, "--query-metrics-out", "");
@@ -322,14 +334,17 @@ int main(int argc, char** argv) {
     const auto load_start = std::chrono::steady_clock::now();
     const auto loaded_index =
         use_mmap ? aims::serialization::read_kmer_exact_index_mmap(temp_index_path,
-                                                                   posting_cache_blocks)
+                                                                   cache_mode == "disabled"
+                                                                       ? 0
+                                                                       : posting_cache_blocks)
                  : aims::serialization::read_kmer_exact_index(temp_index_path);
     const auto load_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - load_start);
     const auto load_cpu_elapsed = process_cpu_ms() - load_cpu_start;
-    if (!use_mmap && posting_cache_blocks != 0) {
+    if (cache_mode != "disabled") {
       for (const auto& layer : loaded_index.layers) {
         layer.postings.set_cache_limit(posting_cache_blocks);
+        layer.postings.set_cache_byte_limit(posting_cache_bytes);
       }
     }
     std::filesystem::remove(temp_index_path);
@@ -361,23 +376,38 @@ int main(int argc, char** argv) {
     std::uint64_t top10_hits = 0;
     latencies.reserve(queries.size());
 
+    const auto search_options = aims::query::KmerSearchOptions{
+        .topk = topk,
+        .max_seeds = max_seeds,
+        .max_postings = max_postings,
+        .max_candidates = max_candidates,
+        .hot_seed_threshold = hot_seed_threshold,
+        .use_frequency_class_hot_policy = !hot_seed_class_arg.empty(),
+        .hot_seed_min_class = hot_seed_class_arg.empty()
+                                  ? aims::FrequencyClass::VeryHot
+                                  : parse_frequency_class(hot_seed_class_arg),
+        .hot_seed_mode = hot_seed_mode,
+    };
+
+    // Warm mode performs one unmeasured workload pass. Cold mode clears decoded blocks before
+    // every measured query. Disabled mode never materializes decoded blocks in the cache.
+    if (cache_mode == "warm") {
+      for (const auto& query : queries) {
+        static_cast<void>(aims::query::search_kmer_exact(loaded_index, query, search_options));
+      }
+    }
+
     const auto query_cpu_start = process_cpu_ms();
     const auto query_start = std::chrono::steady_clock::now();
     for (std::uint64_t repeat = 0; repeat < repeats; ++repeat) {
       for (const auto& query : queries) {
-        const auto metrics = aims::query::search_kmer_exact(
-            loaded_index, query, aims::query::KmerSearchOptions{
-                .topk = topk,
-                .max_seeds = max_seeds,
-                .max_postings = max_postings,
-                .max_candidates = max_candidates,
-                .hot_seed_threshold = hot_seed_threshold,
-                .use_frequency_class_hot_policy = !hot_seed_class_arg.empty(),
-                .hot_seed_min_class = hot_seed_class_arg.empty()
-                                          ? aims::FrequencyClass::VeryHot
-                                          : parse_frequency_class(hot_seed_class_arg),
-                .hot_seed_mode = hot_seed_mode,
-            });
+        if (cache_mode == "cold") {
+          for (const auto& layer : loaded_index.layers) {
+            layer.postings.clear_cache();
+          }
+        }
+        const auto metrics =
+            aims::query::search_kmer_exact(loaded_index, query, search_options);
         if (query_metrics_file) {
           aims::instrumentation::write_query_metrics_jsonl(query_metrics_file, metrics);
         }
@@ -428,7 +458,7 @@ int main(int argc, char** argv) {
     }
     std::cout
               << "},"
-              << "\"cache_mode\":\"warm\","
+              << "\"cache_mode\":\"" << cache_mode << "\","
               << "\"early_stop_mode\":\"" << (budgeted_run ? "heuristic" : "off") << "\","
               << "\"loading_mode\":\"" << (use_mmap ? "mmap" : "copy") << "\","
               << "\"repeats\":" << repeats << ","
