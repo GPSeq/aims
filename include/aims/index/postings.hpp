@@ -40,6 +40,13 @@ private:
 
 class PostingStore {
 public:
+  PostingStore() = default;
+  /** Copies compressed storage safely, rebinding owned blocks and sharing external owners. */
+  PostingStore(const PostingStore& other);
+  PostingStore& operator=(const PostingStore& other);
+  PostingStore(PostingStore&&) noexcept = default;
+  PostingStore& operator=(PostingStore&&) noexcept = default;
+
   struct ReadStats {
     std::uint64_t postings_decoded{0};
     std::uint64_t encoded_bytes_read{0};
@@ -81,6 +88,10 @@ public:
       SeedId id,
       const std::function<void(const Posting&)>& visitor) const;
   [[nodiscard]] std::uint64_t size() const noexcept;
+  /** Return a zero-copy view of one compressed block, regardless of its backing store. */
+  [[nodiscard]] std::span<const std::uint8_t> encoded_block(SeedId id) const;
+  /** Return the logical number of postings declared for one compressed block. */
+  [[nodiscard]] std::uint64_t posting_count(SeedId id) const;
   [[nodiscard]] std::span<const std::vector<std::uint8_t>> encoded_blocks() const noexcept;
   [[nodiscard]] std::span<const std::uint64_t> posting_counts() const noexcept;
 

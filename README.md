@@ -5,6 +5,10 @@ AIMS is a C++20 research system for exact and adaptive biological sequence retri
 
 The current implementation is a stage-matched exact retrieval baseline. It builds a multi-k canonical k-mer index, stores coordinate-aware positional postings, orders query seeds by estimated information per byte accessed, accumulates candidate sequences, and emits per-query instrumentation.
 
+Candidate strand is query-relative: `forward` means the query seed and reference occurrence have
+the same orientation relative to their canonical k-mer, while `reverse` means their orientations
+differ. It is not the reference occurrence's canonical strand by itself.
+
 ## Current Stage
 
 `comparison_stage=exact_retrieval`
@@ -20,6 +24,9 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build --parallel
 ctest --test-dir build --output-on-failure
 ```
+
+Core checks remain active in every build type, including Release. Debug additionally enables
+AddressSanitizer and UndefinedBehaviorSanitizer when supported.
 
 Release build:
 
@@ -125,6 +132,9 @@ build-omp/aims_bench --ref refs.fa --query queries.fa --truth truth.tsv --k 15,1
 | `--hot-mode skip\|doc-only` | no | Hot-seed policy, default `skip`. |
 
 Budget and hot-seed options keep the stage labeled as `exact_retrieval`, but they change the retrieval policy. Skipped hot seeds and budgeted skips are reported explicitly in the metrics.
+Posting-budget decisions count logical postings and therefore do not change when a decoded-block
+cache is cold or warm. The `postings_decoded` and `exact_bytes_read` instrumentation still reports
+physical work, so those measurements can decrease on cache hits.
 
 See [docs/cli_reference.md](docs/cli_reference.md) for all current k-mer options.
 

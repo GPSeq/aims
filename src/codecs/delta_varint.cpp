@@ -1,5 +1,6 @@
 #include "aims/codecs/delta_varint.hpp"
 
+#include <limits>
 #include <stdexcept>
 
 namespace aims::codecs {
@@ -18,6 +19,9 @@ std::uint64_t read_varint(std::span<const std::uint8_t> bytes, std::size_t& offs
   std::uint32_t shift = 0;
   while (offset < bytes.size()) {
     const auto byte = bytes[offset++];
+    if (shift == 63U && (byte & 0x7eU) != 0) {
+      throw std::runtime_error("delta-varint value exceeds uint64 range");
+    }
     value |= static_cast<std::uint64_t>(byte & 0x7fU) << shift;
     if ((byte & 0x80U) == 0) {
       return value;
@@ -61,6 +65,9 @@ std::vector<std::uint64_t> DeltaVarintCodec::decode(std::span<const std::uint8_t
   std::uint64_t previous = 0;
   for (std::uint64_t i = 0; i < count; ++i) {
     const auto delta = read_varint(bytes, offset);
+    if (i != 0 && delta > std::numeric_limits<std::uint64_t>::max() - previous) {
+      throw std::runtime_error("delta-varint value overflow");
+    }
     const auto value = i == 0 ? delta : previous + delta;
     values.push_back(value);
     previous = value;

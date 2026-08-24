@@ -43,3 +43,25 @@ Goal: add focused tests for configurable frequency classes, class-aware hot-seed
 Status: done.
 
 Goal: rebuild, run the complete test suite, and regenerate the algorithm PDF if documentation changed.
+
+## Step 8: Correct query-relative strand accumulation
+
+Status: done.
+
+Goal: retain canonical orientation counts while deduplicating query seeds and combine query and
+reference orientation with XOR so same-strand and reverse-complement evidence is not mislabeled or
+split by reference canonicalization alone.
+
+## Step 9: Remove avoidable query overhead
+
+Status: done.
+
+Goal: resolve seed IDs once in the planner, reserve planner output, use partial sorting for top-k,
+and reuse a fixed number of query workers instead of creating one asynchronous task per query.
+
+## Step 10: Backing-store-safe postings
+
+Status: done.
+
+Goal: make posting-store copies rebind internal references, make mmap and owned compressed blocks
+equally serializable, and keep posting budgets deterministic across cache states.

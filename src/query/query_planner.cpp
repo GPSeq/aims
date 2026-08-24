@@ -11,6 +11,7 @@ QueryPlan QueryPlanner::plan(std::vector<SeedOccurrence> generated,
                              std::uint64_t document_count) const {
   QueryPlan plan;
   plan.seeds_generated = generated.size();
+  plan.seeds.reserve(generated.size());
   if (!generated.empty()) {
     plan.family = generated.front().key.family;
     plan.k = generated.front().key.k;
@@ -25,6 +26,7 @@ QueryPlan QueryPlanner::plan(std::vector<SeedOccurrence> generated,
       plan.seeds.push_back(std::move(planned));
       continue;
     }
+    planned.seed_id = seed_id;
 
     const auto& meta = dictionary.metadata(*seed_id);
     const double idf = std::log((static_cast<double>(document_count) + 1.0) /

@@ -30,6 +30,8 @@ The current CLI uses a checksum-validated binary `KmerExactIndex` for Phase 1 ex
 9. `checksum_footer_offset`
 
 Readers must reject unknown magic values, unsupported versions, inconsistent offsets, invalid enum values, and invalid checksum footers.
+All length and offset checks are subtraction-based to avoid integer-wraparound accepting malformed
+files. Posting decoders also reject out-of-range varints and coordinate delta overflow.
 
 ## Current KmerExactIndex Payload
 
@@ -47,3 +49,7 @@ This format is exact retrieval only. It does not contain router summaries or ali
 ## Loading Modes
 
 The standard reader copies compressed posting blocks into owned memory. The mmap reader keeps posting blocks as references into a mapped index file and decodes blocks lazily during query execution. Both readers validate the same checksum footer before exposing the index.
+
+Serialization uses a backing-store-neutral compressed-block view. An index loaded with either the
+copy reader or mmap reader can therefore be serialized again without decoding and recompressing
+its postings.

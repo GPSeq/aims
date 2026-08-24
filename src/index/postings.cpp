@@ -8,6 +8,33 @@
 
 namespace aims::index {
 
+PostingStore::PostingStore(const PostingStore& other) {
+  std::lock_guard<std::mutex> lock(*other.cache_mutex_);
+  encoded_blocks_ = other.encoded_blocks_;
+  posting_counts_ = other.posting_counts_;
+  max_cached_blocks_ = other.max_cached_blocks_;
+
+  block_refs_.reserve(other.block_refs_.size());
+  const bool owns_all_blocks = other.encoded_blocks_.size() == other.block_refs_.size();
+  for (std::size_t i = 0; i < other.block_refs_.size(); ++i) {
+    const auto& source = other.block_refs_[i];
+    block_refs_.push_back(EncodedBlockRef{
+        .owner = owns_all_blocks ? std::shared_ptr<const void>{} : source.owner,
+        .data = owns_all_blocks ? encoded_blocks_[i].data() : source.data,
+        .encoded_size = source.encoded_size,
+        .posting_count = source.posting_count,
+    });
+  }
+}
+
+PostingStore& PostingStore::operator=(const PostingStore& other) {
+  if (this != &other) {
+    PostingStore copy(other);
+    *this = std::move(copy);
+  }
+  return *this;
+}
+
 PostingView::PostingView(std::span<const Posting> postings) noexcept : postings_(postings) {}
 
 PostingView::PostingView(std::shared_ptr<const std::vector<Posting>> owned_postings,
@@ -151,6 +178,16 @@ PostingStore::ReadStats PostingStore::visit_postings(
 
 std::uint64_t PostingStore::size() const noexcept {
   return block_refs_.size();
+}
+
+std::span<const std::uint8_t> PostingStore::encoded_block(SeedId id) const {
+  const auto index = static_cast<std::size_t>(id);
+  const auto& block = block_refs_.at(index);
+  return std::span<const std::uint8_t>(block.data, static_cast<std::size_t>(block.encoded_size));
+}
+
+std::uint64_t PostingStore::posting_count(SeedId id) const {
+  return block_refs_.at(static_cast<std::size_t>(id)).posting_count;
 }
 
 std::span<const std::vector<std::uint8_t>> PostingStore::encoded_blocks() const noexcept {

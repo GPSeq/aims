@@ -5,6 +5,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <numeric>
 #include <set>
@@ -274,7 +275,11 @@ int main(int argc, char** argv) {
     const auto ref_path = std::filesystem::path(require_arg(argc, argv, "--ref"));
     const auto query_path = std::filesystem::path(require_arg(argc, argv, "--query"));
     const auto k_values = parse_k_values(require_arg(argc, argv, "--k"));
-    const auto topk = static_cast<std::uint32_t>(std::stoul(arg_or(argc, argv, "--topk", "10")));
+    const auto topk_value = std::stoull(arg_or(argc, argv, "--topk", "10"));
+    if (topk_value > std::numeric_limits<std::uint32_t>::max()) {
+      throw std::runtime_error("--topk is too large");
+    }
+    const auto topk = static_cast<std::uint32_t>(topk_value);
     const auto dataset_name = arg_or(argc, argv, "--dataset", "synthetic_kmer_fixture");
     const auto truth_path_arg = arg_or(argc, argv, "--truth", "");
     const auto max_seeds = std::stoull(arg_or(argc, argv, "--max-seeds", "0"));

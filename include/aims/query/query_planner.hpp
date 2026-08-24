@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -10,6 +11,8 @@ namespace aims::query {
 
 struct PlannedSeed {
   SeedOccurrence occurrence{};
+  // Resolved once during planning; absent seeds leave this empty and carry a skip reason.
+  std::optional<SeedId> seed_id;
   double information{0.0};
   double estimated_cost{1.0};
   double priority{0.0};

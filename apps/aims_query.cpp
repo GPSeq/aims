@@ -1,9 +1,11 @@
-#include <chrono>
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <future>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -88,8 +90,15 @@ int main(int argc, char** argv) {
     }
     const auto index_path = std::filesystem::path(require_arg(argc, argv, "--index"));
     const auto query_path = std::filesystem::path(require_arg(argc, argv, "--query"));
-    const auto topk = static_cast<std::uint32_t>(std::stoul(arg_or(argc, argv, "--topk", "10")));
+    const auto topk_value = std::stoull(arg_or(argc, argv, "--topk", "10"));
+    if (topk_value > std::numeric_limits<std::uint32_t>::max()) {
+      throw std::runtime_error("--topk is too large");
+    }
+    const auto topk = static_cast<std::uint32_t>(topk_value);
     const auto emit = arg_or(argc, argv, "--emit", "jsonl");
+    if (emit != "jsonl" && emit != "tsv") {
+      throw std::runtime_error("invalid --emit, expected jsonl or tsv");
+    }
     const auto max_seeds = std::stoull(arg_or(argc, argv, "--max-seeds", "0"));
     const auto max_postings = std::stoull(arg_or(argc, argv, "--max-postings", "0"));
     const auto max_candidates = std::stoull(arg_or(argc, argv, "--max-candidates", "0"));
@@ -147,16 +156,21 @@ int main(int argc, char** argv) {
       }
     } else {
       std::vector<std::future<void>> futures;
-      std::size_t next = 0;
-      while (next < queries.size()) {
-        while (futures.size() < threads && next < queries.size()) {
-          const auto query_index = next++;
-          futures.push_back(std::async(std::launch::async, [&, query_index] {
-            results[query_index] = aims::query::search_kmer_exact(index, queries[query_index], options);
-          }));
-        }
-        futures.front().get();
-        futures.erase(futures.begin());
+      const auto worker_count =
+          std::min<std::uint64_t>(threads, static_cast<std::uint64_t>(queries.size()));
+      futures.reserve(static_cast<std::size_t>(worker_count));
+      std::atomic<std::size_t> next_query{0};
+      for (std::uint64_t worker = 0; worker < worker_count; ++worker) {
+        futures.push_back(std::async(std::launch::async, [&] {
+          while (true) {
+            const auto query_index = next_query.fetch_add(1, std::memory_order_relaxed);
+            if (query_index >= queries.size()) {
+              return;
+            }
+            results[query_index] =
+                aims::query::search_kmer_exact(index, queries[query_index], options);
+          }
+        }));
       }
       for (auto& future : futures) {
         future.get();

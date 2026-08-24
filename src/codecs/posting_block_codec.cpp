@@ -1,5 +1,6 @@
 #include "aims/codecs/posting_block_codec.hpp"
 
+#include <limits>
 #include <stdexcept>
 
 namespace aims::codecs {
@@ -28,6 +29,9 @@ std::uint64_t read_varint(std::span<const std::uint8_t> bytes, std::size_t& offs
   while (offset < bytes.size()) {
     // Consume the next byte from the compressed block.
     const auto byte = bytes[offset++];
+    if (shift == 63U && (byte & 0x7eU) != 0) {
+      throw std::runtime_error("posting block varint exceeds uint64 range");
+    }
     // Merge the seven payload bits into the decoded integer.
     value |= static_cast<std::uint64_t>(byte & 0x7fU) << shift;
     // A clear continuation bit means this integer is complete.
@@ -146,14 +150,22 @@ void PostingBlockCodec::visit(std::span<const std::uint8_t> bytes,
     // Reconstruct the document ID from the first absolute value or later delta.
     const auto document_id = i == 0 ? static_cast<DocumentId>(doc_delta)
                                     : static_cast<DocumentId>(previous_doc + doc_delta);
+    if ((i == 0 && doc_delta > std::numeric_limits<DocumentId>::max()) ||
+        (i != 0 && doc_delta > std::numeric_limits<DocumentId>::max() - previous_doc)) {
+      throw std::runtime_error("posting block document ID overflow");
+    }
     // Reconstruct sequence ID as a delta only if the document stayed the same.
-    const auto sequence_id =
-        i != 0 && document_id == previous_doc ? previous_seq + seq_delta : seq_delta;
+    const bool same_document = i != 0 && document_id == previous_doc;
+    if (same_document && seq_delta > std::numeric_limits<SequenceId>::max() - previous_seq) {
+      throw std::runtime_error("posting block sequence ID overflow");
+    }
+    const auto sequence_id = same_document ? previous_seq + seq_delta : seq_delta;
     // Reconstruct position as a delta only if the sequence stayed the same.
-    const auto position =
-        i != 0 && document_id == previous_doc && sequence_id == previous_seq
-            ? previous_pos + pos_delta
-            : pos_delta;
+    const bool same_sequence = same_document && sequence_id == previous_seq;
+    if (same_sequence && pos_delta > std::numeric_limits<Position>::max() - previous_pos) {
+      throw std::runtime_error("posting block position overflow");
+    }
+    const auto position = same_sequence ? previous_pos + pos_delta : pos_delta;
     // Strand has only two legal values in this DNA index.
     if (strand > 1) {
       throw std::runtime_error("invalid strand in posting block");

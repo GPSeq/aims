@@ -7,6 +7,12 @@
 namespace aims::io {
 namespace {
 
+void strip_carriage_return(std::string& line) {
+  if (!line.empty() && line.back() == '\r') {
+    line.pop_back();
+  }
+}
+
 FastaRecord make_record(std::string name, std::string sequence, std::uint64_t id) {
   if (id > std::numeric_limits<DocumentId>::max()) {
     throw std::runtime_error("too many sequence records for 32-bit document identifiers");
@@ -63,6 +69,7 @@ void read_fasta_chunks(const std::filesystem::path& path,
   std::string line;
   bool has_record = false;
   while (std::getline(in, line)) {
+    strip_carriage_return(line);
     if (line.empty()) {
       continue;
     }
@@ -104,6 +111,7 @@ void read_fastq_chunks(const std::filesystem::path& path,
   std::string plus;
   std::string quality;
   while (std::getline(in, name)) {
+    strip_carriage_return(name);
     if (name.empty()) {
       continue;
     }
@@ -113,6 +121,9 @@ void read_fastq_chunks(const std::filesystem::path& path,
     if (!std::getline(in, sequence) || !std::getline(in, plus) || !std::getline(in, quality)) {
       throw std::runtime_error("truncated FASTQ record in: " + path.string());
     }
+    strip_carriage_return(sequence);
+    strip_carriage_return(plus);
+    strip_carriage_return(quality);
     if (plus.empty() || plus.front() != '+') {
       throw std::runtime_error("invalid FASTQ plus line in: " + path.string());
     }

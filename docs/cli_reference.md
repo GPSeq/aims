@@ -37,6 +37,11 @@ Important options:
 
 `--threads` preserves input-order output. `--mmap` keeps compressed posting blocks file-backed. `--posting-cache-blocks` caches decoded posting blocks. `--hot-seed-threshold` applies a query-time collection-frequency cutoff. `--hot-seed-class` applies the build-time frequency class policy. `--hot-mode doc-only` uses hot seeds once per document/sequence/strand candidate instead of every coordinate.
 
+Candidate strand is relative to the query, not an absolute reference annotation. It is `forward`
+when query and reference occurrences have equal canonical orientation and `reverse` when they
+differ. Posting budgets are based on logical posting-list sizes and yield the same retrieval plan
+for cold and warm caches; byte and decode metrics continue to reflect physical cache behavior.
+
 ## Benchmark
 
 ```sh

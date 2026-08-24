@@ -34,6 +34,9 @@ void SortedArrayDictionary::build(std::vector<SeedKey> keys, std::vector<SeedMet
     keys_ = std::move(sorted_keys);
     metadata_ = std::move(sorted_metadata);
   }
+  if (std::adjacent_find(keys_.begin(), keys_.end()) != keys_.end()) {
+    throw std::invalid_argument("dictionary keys must be unique");
+  }
   id_index_.clear();
   id_index_.reserve(keys_.size());
   for (std::size_t i = 0; i < keys_.size(); ++i) {
@@ -50,11 +53,7 @@ std::optional<SeedId> SortedArrayDictionary::id(const SeedKey& key) const {
   if (found != id_index_.end()) {
     return found->second;
   }
-  const auto it = std::lower_bound(keys_.begin(), keys_.end(), key);
-  if (it == keys_.end() || *it != key) {
-    return std::nullopt;
-  }
-  return static_cast<SeedId>(std::distance(keys_.begin(), it));
+  return std::nullopt;
 }
 
 const SeedMetadata& SortedArrayDictionary::metadata(SeedId id) const {

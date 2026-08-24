@@ -66,12 +66,6 @@ std::vector<std::uint16_t> parse_k_values(const std::string& value) {
     throw std::runtime_error("at least one k value is required");
   }
 
-  std::cout << "Selected K-values: " << std::endl;
-  for (const std::uint16_t& k : unique){
-
-    std::cout << k << " ";
-  } 
-  std::cout << "" << std::endl;
   return {unique.begin(), unique.end()};
 }
 

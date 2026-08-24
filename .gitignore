@@ -1,3 +1,13 @@
 build/
+build-*/
+CMakeFiles/
+CMakeCache.txt
+compile_commands.json
+.DS_Store
 *.aims
 *.fa
+docs/*.aux
+docs/*.fdb_latexmk
+docs/*.fls
+docs/*.log
+docs/*.out

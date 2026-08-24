@@ -30,6 +30,13 @@ struct SeedTask {
   double priority{0.0};
   // The number of repeated query occurrences represented by this one posting lookup.
   std::uint32_t occurrence_count{0};
+  // Information contributed by query occurrences encoded on the canonical forward strand.
+  double forward_information{0.0};
+  // Information contributed by query occurrences encoded on the canonical reverse strand.
+  double reverse_information{0.0};
+  // Query occurrence counts are retained per strand so candidate orientation is relative.
+  std::uint32_t forward_occurrence_count{0};
+  std::uint32_t reverse_occurrence_count{0};
 };
 
 // Deduplication key: the same seed ID in different k layers is not the same lookup.
@@ -118,6 +125,31 @@ bool frequency_class_at_least(FrequencyClass observed, FrequencyClass minimum) {
   return static_cast<std::uint8_t>(observed) >= static_cast<std::uint8_t>(minimum);
 }
 
+// Canonical seed strands describe each occurrence relative to the canonical representation.
+// Their XOR gives the reference sequence orientation relative to the query sequence.
+Strand relative_strand(Strand query_strand, Strand reference_strand) noexcept {
+  return query_strand == reference_strand ? Strand::Forward : Strand::Reverse;
+}
+
+// Add a posting once for each query-strand group represented by a deduplicated seed task.
+void add_relative_posting(CandidateAccumulator& accumulator,
+                          const index::Posting& posting,
+                          const SeedTask& task,
+                          instrumentation::QueryMetrics& metrics) {
+  if (task.forward_occurrence_count != 0) {
+    auto relative = posting;
+    relative.strand = relative_strand(Strand::Forward, posting.strand);
+    accumulator.add_posting(relative, task.forward_information, metrics,
+                            task.forward_occurrence_count);
+  }
+  if (task.reverse_occurrence_count != 0) {
+    auto relative = posting;
+    relative.strand = relative_strand(Strand::Reverse, posting.strand);
+    accumulator.add_posting(relative, task.reverse_information, metrics,
+                            task.reverse_occurrence_count);
+  }
+}
+
 // Resolve a sequence ID back to its stored name for structured top-k output.
 std::string_view sequence_name_for(const build::KmerExactIndex& index, SequenceId id) {
   // Sequence metadata is small compared with postings, so a linear scan is acceptable here.
@@ -189,6 +221,8 @@ instrumentation::QueryMetrics search_kmer_exact(const build::KmerExactIndex& ind
   std::vector<SeedTask> seed_tasks;
   // seed_task_index maps (layer, seed_id) to the existing task for deduplication.
   std::unordered_map<SeedTaskKey, std::size_t, SeedTaskKeyHash> seed_task_index;
+  // Budget accounting is logical and therefore stable across cold and warm posting caches.
+  std::uint64_t postings_budget_used = 0;
 
   // Generate and plan seeds independently for every indexed k layer.
   for (std::size_t layer_index = 0; layer_index < index.layers.size(); ++layer_index) {
@@ -221,14 +255,12 @@ instrumentation::QueryMetrics search_kmer_exact(const build::KmerExactIndex& ind
     for (auto& seed : plan.seeds) {
       // Seeds with a skip reason are absent from the exact dictionary or otherwise unusable.
       if (seed.skip_reason.empty()) {
-        // Look up the exact seed ID for this layer.
-        const auto seed_id = layer.dictionary.id(seed.occurrence.key);
-        // A missing ID should be rare after planning, but skip defensively.
-        if (!seed_id.has_value()) {
+        // The planner already resolved the exact seed ID; retain a defensive check.
+        if (!seed.seed_id.has_value()) {
           continue;
         }
         // Build the deduplication key.
-        const auto key = SeedTaskKey{.layer_index = layer_index, .seed_id = *seed_id};
+        const auto key = SeedTaskKey{.layer_index = layer_index, .seed_id = *seed.seed_id};
         // Check whether this query has already requested the same seed in this layer.
         const auto found = seed_task_index.find(key);
         // First occurrence creates a new posting lookup task.
@@ -238,11 +270,19 @@ instrumentation::QueryMetrics search_kmer_exact(const build::KmerExactIndex& ind
           // Store the seed information and cost from the planner.
           seed_tasks.push_back(SeedTask{
               .layer_index = layer_index,
-              .seed_id = *seed_id,
+              .seed_id = *seed.seed_id,
               .information = seed.information,
               .estimated_cost = seed.estimated_cost,
               .priority = seed.priority,
               .occurrence_count = 1,
+              .forward_information = seed.occurrence.strand == Strand::Forward
+                                         ? seed.information
+                                         : 0.0,
+              .reverse_information = seed.occurrence.strand == Strand::Reverse
+                                         ? seed.information
+                                         : 0.0,
+              .forward_occurrence_count = seed.occurrence.strand == Strand::Forward ? 1U : 0U,
+              .reverse_occurrence_count = seed.occurrence.strand == Strand::Reverse ? 1U : 0U,
           });
         } else {
           // Repeated query seeds reuse one posting lookup but add evidence weight.
@@ -251,6 +291,13 @@ instrumentation::QueryMetrics search_kmer_exact(const build::KmerExactIndex& ind
           task.information += seed.information;
           // Count repeated occurrences so candidate support reflects multiplicity.
           ++task.occurrence_count;
+          if (seed.occurrence.strand == Strand::Forward) {
+            task.forward_information += seed.information;
+            ++task.forward_occurrence_count;
+          } else {
+            task.reverse_information += seed.information;
+            ++task.reverse_occurrence_count;
+          }
           // Recompute priority after changing the information value.
           task.priority = task.information / task.estimated_cost;
         }
@@ -290,7 +337,7 @@ instrumentation::QueryMetrics search_kmer_exact(const build::KmerExactIndex& ind
 
     // Enforce a maximum decoded-posting budget when configured.
     if (options.max_postings != 0 &&
-        metrics.postings_decoded + metadata.collection_frequency > options.max_postings) {
+        metadata.collection_frequency > options.max_postings - postings_budget_used) {
       // Count the skipped task at query level.
       metrics.postings_skipped_budget += task.occurrence_count;
       // Count the skipped task at layer level.
@@ -339,17 +386,32 @@ instrumentation::QueryMetrics search_kmer_exact(const build::KmerExactIndex& ind
       const auto read_stats = layer.postings.visit_postings(
           task.seed_id,
           [&](const index::Posting& posting) {
-            // Candidate identity for doc-only hot-seed contribution.
-            const auto key = CandidateSeenKey{
-                .document_id = posting.document_id,
-                .sequence_id = posting.sequence_id,
-                .strand = posting.strand,
+            const auto remember_candidate = [&](Strand query_strand,
+                                                std::uint32_t occurrence_count) {
+              if (occurrence_count == 0) {
+                return;
+              }
+              const auto key = CandidateSeenKey{
+                  .document_id = posting.document_id,
+                  .sequence_id = posting.sequence_id,
+                  .strand = relative_strand(query_strand, posting.strand),
+              };
+              seen.insert(key);
             };
-            // Only the first coordinate per candidate receives this hot seed's evidence.
-            if (seen.insert(key).second) {
-              accumulator.add_posting(posting, task.information, metrics, task.occurrence_count);
-            }
+            remember_candidate(Strand::Forward, task.forward_occurrence_count);
+            remember_candidate(Strand::Reverse, task.reverse_occurrence_count);
           });
+      // Doc-only mode contributes the complete deduplicated query-seed evidence once per
+      // document/sequence/relative-strand candidate, irrespective of reference coordinates.
+      for (const auto& candidate : seen) {
+        accumulator.add_posting(index::Posting{
+                                    .document_id = candidate.document_id,
+                                    .sequence_id = candidate.sequence_id,
+                                    .position = 0,
+                                    .strand = candidate.strand,
+                                },
+                                task.information, metrics, task.occurrence_count);
+      }
       // Charge compressed bytes read for this posting block.
       metrics.exact_bytes_read += read_stats.encoded_bytes_read;
       // Charge logical decoded postings for this posting block.
@@ -363,6 +425,9 @@ instrumentation::QueryMetrics search_kmer_exact(const build::KmerExactIndex& ind
       // Add layer-local decoded posting delta.
       layer_metrics.postings_decoded += metrics.postings_decoded - before_postings;
       // Hot doc-only mode has fully handled this task.
+      if (options.max_postings != 0) {
+        postings_budget_used += metadata.collection_frequency;
+      }
       continue;
     }
 
@@ -374,7 +439,7 @@ instrumentation::QueryMetrics search_kmer_exact(const build::KmerExactIndex& ind
         task.seed_id,
         [&](const index::Posting& posting) {
           // Add every exact coordinate occurrence for non-hot or unrestricted seeds.
-          accumulator.add_posting(posting, task.information, metrics, task.occurrence_count);
+          add_relative_posting(accumulator, posting, task, metrics);
         });
     // Charge compressed bytes read for this posting block.
     metrics.exact_bytes_read += read_stats.encoded_bytes_read;
@@ -389,6 +454,9 @@ instrumentation::QueryMetrics search_kmer_exact(const build::KmerExactIndex& ind
     layer_metrics.exact_bytes_read += metrics.exact_bytes_read - before_bytes;
     // Add layer-local decoded posting delta.
     layer_metrics.postings_decoded += metrics.postings_decoded - before_postings;
+    if (options.max_postings != 0) {
+      postings_budget_used += metadata.collection_frequency;
+    }
   }
 
   // Extract the final ranked candidate set.

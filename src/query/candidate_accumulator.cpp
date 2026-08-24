@@ -8,6 +8,20 @@ namespace aims::query {
 CandidateAccumulator::CandidateAccumulator(CandidateAccumulatorOptions options)
     : options_(options) {}
 
+namespace {
+
+bool candidate_ranks_before(const CandidateScore& lhs, const CandidateScore& rhs) {
+  if (lhs.score != rhs.score) {
+    return lhs.score > rhs.score;
+  }
+  if (lhs.supporting_seeds != rhs.supporting_seeds) {
+    return lhs.supporting_seeds > rhs.supporting_seeds;
+  }
+  return lhs < rhs;
+}
+
+} // namespace
+
 std::size_t CandidateAccumulator::CandidateKeyHash::operator()(const CandidateKey& key) const noexcept {
   std::size_t value = std::hash<std::uint32_t>{}(key.document_id);
   value ^= std::hash<std::uint64_t>{}(key.sequence_id) + 0x9e3779b97f4a7c15ULL + (value << 6U) + (value >> 2U);
@@ -62,23 +76,18 @@ void CandidateAccumulator::add_posting(const index::Posting& posting,
 }
 
 std::vector<CandidateScore> CandidateAccumulator::top_k(std::uint32_t k) const {
+  if (k == 0 || candidates_.empty()) {
+    return {};
+  }
   std::vector<CandidateScore> out;
   out.reserve(candidates_.size());
   for (const auto& [_, candidate] : candidates_) {
     out.push_back(candidate);
   }
-  std::sort(out.begin(), out.end(), [](const CandidateScore& lhs, const CandidateScore& rhs) {
-    if (lhs.score != rhs.score) {
-      return lhs.score > rhs.score;
-    }
-    if (lhs.supporting_seeds != rhs.supporting_seeds) {
-      return lhs.supporting_seeds > rhs.supporting_seeds;
-    }
-    return lhs < rhs;
-  });
-  if (out.size() > k) {
-    out.resize(k);
-  }
+  const auto result_size = std::min<std::size_t>(out.size(), k);
+  std::partial_sort(out.begin(), out.begin() + static_cast<std::ptrdiff_t>(result_size), out.end(),
+                    candidate_ranks_before);
+  out.resize(result_size);
   return out;
 }
 

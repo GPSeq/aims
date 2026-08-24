@@ -41,7 +41,7 @@ void append_le(std::vector<std::uint8_t>& bytes, UInt value) {
 template <typename UInt>
 UInt read_le(std::span<const std::uint8_t> bytes, std::size_t& offset) {
   static_assert(std::is_unsigned_v<UInt>);
-  if (offset + sizeof(UInt) > bytes.size()) {
+  if (offset > bytes.size() || sizeof(UInt) > bytes.size() - offset) {
     throw std::runtime_error("truncated AIMS index");
   }
   UInt value = 0;
@@ -123,7 +123,7 @@ std::vector<std::uint8_t> read_file(const std::filesystem::path& path) {
 std::string read_string(std::span<const std::uint8_t> bytes, std::size_t& offset) {
   const auto size = read_le<std::uint64_t>(bytes, offset);
   if (size > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max()) ||
-      offset + static_cast<std::size_t>(size) > bytes.size()) {
+      offset > bytes.size() || static_cast<std::size_t>(size) > bytes.size() - offset) {
     throw std::runtime_error("truncated string in AIMS index");
   }
   std::string value(reinterpret_cast<const char*>(bytes.data() + offset),
@@ -147,11 +147,15 @@ build::KmerExactIndex parse_kmer_exact_index(std::span<const std::uint8_t> bytes
   if (header.metadata_offset != offset) {
     throw std::runtime_error("unexpected AIMS metadata offset");
   }
-  if (header.checksum_footer_offset + sizeof(std::uint64_t) != bytes.size()) {
+  if (header.checksum_footer_offset >
+          static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+    throw std::runtime_error("AIMS checksum footer offset is too large for this platform");
+  }
+  const auto footer_offset = static_cast<std::size_t>(header.checksum_footer_offset);
+  if (footer_offset > bytes.size() || bytes.size() - footer_offset != sizeof(std::uint64_t)) {
     throw std::runtime_error("invalid AIMS checksum footer offset");
   }
 
-  std::size_t footer_offset = static_cast<std::size_t>(header.checksum_footer_offset);
   std::size_t checksum_offset = footer_offset;
   const auto stored_checksum = read_le<std::uint64_t>(bytes, checksum_offset);
   const auto computed_checksum =
@@ -236,7 +240,8 @@ build::KmerExactIndex parse_kmer_exact_index(std::span<const std::uint8_t> bytes
         const auto posting_count = read_le<std::uint64_t>(bytes, offset);
         const auto encoded_size = read_le<std::uint64_t>(bytes, offset);
         if (encoded_size > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max()) ||
-            offset + static_cast<std::size_t>(encoded_size) > bytes.size()) {
+            offset > bytes.size() ||
+            static_cast<std::size_t>(encoded_size) > bytes.size() - offset) {
           throw std::runtime_error("AIMS encoded posting block is too large or truncated");
         }
         std::vector<std::uint8_t> block(
@@ -261,7 +266,8 @@ build::KmerExactIndex parse_kmer_exact_index(std::span<const std::uint8_t> bytes
         const auto posting_count = read_le<std::uint64_t>(bytes, offset);
         const auto encoded_size = read_le<std::uint64_t>(bytes, offset);
         if (encoded_size > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max()) ||
-            offset + static_cast<std::size_t>(encoded_size) > bytes.size()) {
+            offset > bytes.size() ||
+            static_cast<std::size_t>(encoded_size) > bytes.size() - offset) {
           throw std::runtime_error("AIMS encoded posting block is too large or truncated");
         }
         owners.push_back(block_owner);
@@ -386,12 +392,11 @@ void write_kmer_exact_index(const std::filesystem::path& path,
       posting_offset_set = true;
     }
     append_le<std::uint64_t>(payload, layer.postings.size());
-    const auto encoded_blocks = layer.postings.encoded_blocks();
-    const auto posting_counts = layer.postings.posting_counts();
-    for (std::size_t i = 0; i < encoded_blocks.size(); ++i) {
-      append_le<std::uint64_t>(payload, posting_counts[i]);
-      append_le<std::uint64_t>(payload, encoded_blocks[i].size());
-      payload.insert(payload.end(), encoded_blocks[i].begin(), encoded_blocks[i].end());
+    for (SeedId i = 0; i < layer.postings.size(); ++i) {
+      const auto encoded_block = layer.postings.encoded_block(i);
+      append_le<std::uint64_t>(payload, layer.postings.posting_count(i));
+      append_le<std::uint64_t>(payload, encoded_block.size());
+      payload.insert(payload.end(), encoded_block.begin(), encoded_block.end());
     }
   }
 

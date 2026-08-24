@@ -2,7 +2,8 @@ set(workdir "${CMAKE_CURRENT_BINARY_DIR}/aims_cli_smoke")
 file(MAKE_DIRECTORY "${workdir}")
 
 file(WRITE "${workdir}/refs.fa" ">ref0\nAACCGGTTAACC\n>ref1\nTTTTAACCGGTT\n")
-file(WRITE "${workdir}/queries.fq" "@q0\nAACCGGTT\n+\nFFFFFFFF\n")
+file(WRITE "${workdir}/queries.fq"
+  "@q0\nAACCGGTT\n+\nFFFFFFFF\n@q1\nTTTTAACC\n+\nIIIIIIII\n")
 
 execute_process(
   COMMAND "${AIMS_BUILD_EXE}" --ref "${workdir}/refs.fa" --out "${workdir}/idx.aims" --k 4,6
@@ -37,6 +38,12 @@ endif()
 string(FIND "${query_output_file}" "\"topk_results\":" topk_pos)
 if(topk_pos EQUAL -1)
   message(FATAL_ERROR "query output missing topk_results: ${query_output_file}")
+endif()
+
+string(FIND "${query_output_file}" "\"query_id\":\"q0\"" q0_pos)
+string(FIND "${query_output_file}" "\"query_id\":\"q1\"" q1_pos)
+if(q0_pos EQUAL -1 OR q1_pos EQUAL -1 OR q1_pos LESS q0_pos)
+  message(FATAL_ERROR "threaded query output did not preserve input order: ${query_output_file}")
 endif()
 
 execute_process(

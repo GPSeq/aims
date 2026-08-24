@@ -50,11 +50,15 @@ if(AIMS_ENABLE_OPENMP)
   target_compile_definitions(aims PUBLIC AIMS_HAS_OPENMP=1)
 endif()
 
-if(MSVC)
-  target_compile_options(aims PRIVATE /W4 /permissive-)
-else()
-  target_compile_options(aims PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
-endif()
+function(aims_enable_warnings target)
+  if(MSVC)
+    target_compile_options(${target} PRIVATE /W4 /permissive-)
+  else()
+    target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+  endif()
+endfunction()
+
+aims_enable_warnings(aims)
 
 if(AIMS_ENABLE_ASAN AND CMAKE_BUILD_TYPE STREQUAL "Debug" AND NOT MSVC)
   target_compile_options(aims PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
@@ -98,12 +102,14 @@ foreach(app aims_build aims_query aims_dump aims_bench aims_validate)
   add_executable(${app} apps/${app}.cpp)
   target_link_libraries(${app} PRIVATE aims)
   target_compile_features(${app} PRIVATE cxx_std_20)
+  aims_enable_warnings(${app})
 endforeach()
 
 if(BUILD_TESTING)
   add_executable(aims_core_tests
     tests/test_core.cpp)
   target_link_libraries(aims_core_tests PRIVATE aims)
+  aims_enable_warnings(aims_core_tests)
   add_test(NAME aims_core_tests COMMAND aims_core_tests)
 
   add_test(NAME aims_cli_smoke
